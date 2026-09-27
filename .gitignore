@@ -1,0 +1,27 @@
+# ===== 编译产物（可再生，勿提交）=====
+*_Runs/
+*.db
+*.bit
+*.qor
+*.area
+*.timing
+*.ts
+*.log
+*.logw
+run.bat
+settings.cfg
+.temp.f
+.lock.f
+.recent_user_depot.ini
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== 编辑器 / 系统文件 =====
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+~$*
