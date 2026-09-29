@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Project Version="3" Minor="2" Path="D:/AnLu/7_lab_ex_2026_nosoft/fortext/lab_ex4_tf/src/td_project">
+<Project Version="3" Minor="2" Path="F:/FPGA_anlu/2026-Anlogic-FPGA-hdmi-player/src/td_project">
     <Project_Created_Time></Project_Created_Time>
     <TD_Version>6.2.168116</TD_Version>
     <Name>lab_ex5_i2s_v1.0</Name>
@@ -28,6 +28,22 @@
                     <Attr Name="CompileOrder" Val="2"/>
                 </FileInfo>
             </File>
+            <File Path="../user_source/hdl_source/I2S_receiver.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="3"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/audio_arc_calculate.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="4"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/hdmi_phy_warpper.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -50,6 +66,24 @@
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="6"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/test/i2s_test_tone_gen_pll.v">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="7"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/rom/i2s_rom_player_single_pll_fix64_rom_ip.v">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="8"/>
                 </FileInfo>
             </File>
             <File Path="../user_source/hdl_source/top_tf_hdmi_audio.v">
@@ -142,6 +176,14 @@
                     <Attr Name="CompileOrder" Val="22"/>
                 </FileInfo>
             </File>
+            <File Path="../user_source/hdl_source/hdmi_audio_tone_i2s_64fs.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="23"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/startup_pulse.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -229,6 +271,15 @@
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="33"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/hdmi_audio_tone_pcm_scale.v">
+                <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="36"/>
                 </FileInfo>
             </File>
             <File Path="../user_source/hdl_source/SD/seg_decoder.v">
