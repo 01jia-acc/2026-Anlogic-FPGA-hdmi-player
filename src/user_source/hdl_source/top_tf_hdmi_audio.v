@@ -77,7 +77,11 @@ module top(
     output                      sd_ncs,        // 【输出到 TF 卡】SPI 片选，低有效
     output                      sd_dclk,       // 【输出到 TF 卡】SPI 时钟
     output                      sd_mosi,       // 【输出到 TF 卡】FPGA→TF 卡串行数据
-    input                       sd_miso        // 【输入自 TF 卡】TF 卡→FPGA 串行数据
+    input                       sd_miso,       // 【输入自 TF 卡】TF 卡→FPGA 串行数据
+
+    // USB-UART（板载 CH340：FPGA RXD=F12，TXD=D12）
+    input                       uart_rxd,      // 【输入自 CH340】串口接收，预留给后续命令
+    output                      uart_txd       // 【输出到 CH340】串口日志 TX
 );
 
 // SDRAM 应用侧数据宽度：每个存储字 32 bit。
@@ -118,6 +122,27 @@ wire        display_valid;  // 【sd_card_bmp 输出→top】第一张图完整�
 // sd_card_bmp 的调试状态码，经过译码后显示在数码管上。
 wire [3:0]  state_code;    // 【sd_card_bmp 输出→seg_decoder】当前 SD/加载状态码
 wire [6:0]  seg_data_0;    // 【seg_decoder 输出→seg_scan】低有效/编码后的段码
+
+// USB-UART 调试状态：由 SD/FAT32 控制器提供，供 50 MHz 日志时钟域采样。
+wire        debug_sd_init_done;
+wire        debug_scan_busy;
+wire        debug_scan_done;
+wire [7:0]  debug_scan_error;
+wire        debug_source_ready;
+wire        debug_load_busy;
+wire [7:0]  debug_load_error;
+// FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
+wire [3:0]  debug_scanner_state;
+wire [31:0] debug_sector_lba;
+wire [8:0]  debug_sector_byte_count;
+wire        debug_sector_active;
+wire [15:0] debug_sector_done_count;
+wire [3:0]  debug_resource_valid;
+wire [4:0]  debug_sd_state;
+wire        debug_sd_cmd_error;
+wire        debug_sd_cmd_error_latched;
+wire [7:0]  uart_rx_data;
+wire        uart_rx_valid;
 
 // HDMI 读帧接口，主要在 video_clk 域使用。
 // video_read_req 是一帧读请求；video_read_en 是一个像素读使能。
@@ -290,7 +315,66 @@ sd_card_bmp_fat32 #(
     .SD_nCS            (sd_ncs),                // 输出→TF 卡：SPI 片选
     .SD_DCLK           (sd_dclk),               // 输出→TF 卡：SPI 时钟
     .SD_MOSI           (sd_mosi),               // 输出→TF 卡：SPI 主出从入数据
-    .SD_MISO           (sd_miso)                // 输入←TF 卡：SPI 主入从出数据
+    .SD_MISO           (sd_miso),               // 输入←TF 卡：SPI 主入从出数据
+    .debug_sd_init_done(debug_sd_init_done),
+    .debug_scan_busy   (debug_scan_busy),
+    .debug_scan_done   (debug_scan_done),
+    .debug_scan_error  (debug_scan_error),
+    .debug_source_ready(debug_source_ready),
+    .debug_load_busy   (debug_load_busy),
+    .debug_load_error  (debug_load_error),
+    .debug_scanner_state(debug_scanner_state),
+    .debug_sector_lba(debug_sector_lba),
+    .debug_sector_byte_count(debug_sector_byte_count),
+    .debug_sector_active(debug_sector_active),
+    .debug_sector_done_count(debug_sector_done_count),
+    .debug_resource_valid(debug_resource_valid),
+    .debug_sd_state(debug_sd_state),
+    .debug_sd_cmd_error(debug_sd_cmd_error),
+    .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched)
+ );
+
+// ============================================================================
+// USB-UART 调试接口
+// ============================================================================
+// 115200 baud, 8 data bits, no parity, 1 stop bit (8-N-1).
+// 日志从 uart_txd 输出；uart_rxd 已接入接收器，最近收到的字节会在日志
+// 中显示，后续可在此基础上增加串口命令控制。
+uart_rx #(
+    .CLOCK_FREQ_HZ(50_000_000),
+    .BAUD_RATE    (115_200)
+) u_uart_rx (
+    .clk      (clk),
+    .rst      (~rst_n),
+    .rx       (uart_rxd),
+    .rx_data  (uart_rx_data),
+    .rx_valid (uart_rx_valid)
+);
+
+uart_debug_logger #(
+    .CLOCK_FREQ_HZ   (50_000_000),
+    .BAUD_RATE       (115_200),
+    .LOG_INTERVAL_MS (1000)
+) u_uart_debug_logger (
+    .clk            (clk),
+    .rst            (~rst_n),
+    .pll_ready      (sys_pll_lock && video_pll_lock),
+    .sd_init_done   (debug_sd_init_done),
+    .state_code     (state_code),
+    .scan_busy      (debug_scan_busy),
+    .scan_done      (debug_scan_done),
+    .scan_error     (debug_scan_error | debug_load_error),
+    .display_valid  (display_valid),
+    .rx_data        (uart_rx_data),
+    .scanner_state  (debug_scanner_state),
+    .sector_active  (debug_sector_active),
+    .sector_lba     (debug_sector_lba),
+    .sector_byte_count(debug_sector_byte_count),
+    .sd_state       (debug_sd_state),
+    .sd_cmd_error_latched(debug_sd_cmd_error_latched),
+    .resource_valid (debug_resource_valid),
+    .sector_done_count(debug_sector_done_count),
+    .tx             (uart_txd)
 );
 
 // ============================================================================
