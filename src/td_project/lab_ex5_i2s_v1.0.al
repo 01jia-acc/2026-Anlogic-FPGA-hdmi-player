@@ -297,6 +297,30 @@
                     <Attr Name="CompileOrder" Val="41"/>
                 </FileInfo>
             </File>
+            <File Path="../user_source/hdl_source/uart/uart_debug_logger.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="42"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/uart/uart_rx.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="43"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/uart/uart_tx.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="44"/>
+                </FileInfo>
+            </File>
         </Verilog>
         <ADC_FILE>
             <File Path="../user_source/constraints_source/pin.adc">
