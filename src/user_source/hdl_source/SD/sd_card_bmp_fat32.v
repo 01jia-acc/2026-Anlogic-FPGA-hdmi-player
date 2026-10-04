@@ -18,21 +18,21 @@
 //      size_lut 查表得到首簇/大小 → u_image_source 读卡、沿 FAT 簇链取文件、
 //      BMP 解码出像素流；中途它用 write_req 拉 frame_read_write 准备写帧。
 //   3. write 写帧：像素流 write_en/write_data → frame_read_write 写 FIFO →
-//      SDRAM 双缓冲。整帧写完以 write_finish_toggle（跨域 toggle 事件）返回。
-//   顶层把"文件读完"（source_load_done）和"整帧写完"（write_finish_pulse）
-//   两个独立事件"汇合"——都到达才切换显示缓冲 disp_buf_idx。
+//      SDRAM 四个固定帧缓存。整帧写完以 write_finish_toggle 返回。
+//   "文件读完"和"整帧写完"两个事件汇合后，标记该图片可显示。
+//   首图立即启显；后续图片顺序预加载，按键只切换已完成的缓存。
 //
 // 【阅读导航（建议按此顺序读本文件）】
 //   1. 端口声明：先分清三类信号——事件(单拍脉冲)/电平(持续状态)/直通线；
 //   2. 内部变量声明：每个都有注释说明"谁驱动它、谁消费它"；
 //   3. assign 组合观察线：纯连线，无状态；
-//   4. 5 个 function：都是纯组合"查表/计算"，不占时钟、不存状态；
+//   4. function：都是纯组合"查表/计算"，不占时钟、不存状态；
 //   5. 唯一的 always 块（本模块全部时序逻辑），按小节读：
 //      (a) 复位默认值          (b) SD 未初始化时清空业务状态
 //      (c) state_code 可视化   (d) scan_done 时锁存资源表
 //      (e) 启动一次扫描        (f) 加载超时保护
-//      (g) 双事件汇合→切显示   (h) 按键解析（短按/长按/自动轮播）
-//      (i) 加载仲裁链（首图/下一张/上一张/自动轮播）
+//      (g) 双事件汇合→标记完成 (h) 按键解析（短按/长按/自动轮播）
+//      (i) 顺序预加载与已完成图片的显示选择
 //
 // 【速记：reg 与 wire 在本文件里的分工】
 //   - reg：在时钟沿更新的"记忆"（触发器）。事件类（*_pulse、*_seen）默认
@@ -82,9 +82,9 @@ module sd_card_bmp_fat32 #(
     // 来自 frame_read_write 所在时钟域（ext_mem_clk 125MHz 域）；每写完一帧
     // 翻转一次 0/1。本模块用三级移位同步后做边沿检测，恢复成单拍事件。
     input  wire        write_finish_toggle,
-    // 双缓冲编号：写入目标 / 当前显示（都指向 SDRAM 里的 Buffer 0/1）。
+    // 四个固定帧缓存：逻辑图片索引与 SDRAM 缓冲编号一一对应。
     output reg  [1:0]  write_buf_idx,  // 本次加载写进哪块 SDRAM 缓冲
-    output reg  [1:0]  disp_buf_idx,   // HDMI 正在显示哪块 SDRAM 缓冲
+    output reg  [1:0]  disp_buf_idx,   // 请求 HDMI 在下一帧显示哪块 SDRAM 缓冲
 
     // ===================== 端口：写帧握手与像素流（对 u_image_source 的直通线） =====================
     // 这四条在 u_image_source 与 frame_read_write 之间传递，本模块只做透明
@@ -176,7 +176,9 @@ module sd_card_bmp_fat32 #(
     // 内部 reg：首图/轮播相关
     // ========================================================================
     // 电平：首图已经同时完成"文件读取 + 帧写入"并提交显示。
-    reg first_image_committed;
+    reg [3:0] image_complete; // 每位表示对应图片已解码且完整写入 SDRAM
+    reg [2:0] preload_next_idx; // 下一张待预加载图片；4 表示四张均已尝试
+    reg preload_halted; // 源文件/写帧失败后暂停，避免复用尚未结束的写通道
     reg auto_play_en;        // 电平：自动轮播开关
     // 轮播定时器（以 clk 周期计数；计满 1 秒产生 auto_tick 后清零）。
     reg [31:0] auto_cnt;
@@ -189,7 +191,6 @@ module sd_card_bmp_fat32 #(
     reg [2:0] img_found_count;
     reg [1:0] img_idx;       // 当前显示图片的逻辑索引
     reg [1:0] load_idx;      // 本次加载目标的逻辑索引（查表线 load_*_lut 的输入）
-    reg [1:0] pending_buf_idx; // 本次加载完成后要切换到的显示缓冲编号
     // 资源表：按扫描结果保存每张图片的首簇（文件在卡上的物理起点）。
     reg [31:0] img_cluster0, img_cluster1, img_cluster2, img_cluster3;
     // 资源表：按扫描结果保存每张图片的字节数。
@@ -239,8 +240,8 @@ module sd_card_bmp_fat32 #(
     // ========================================================================
     wire write_finish_pulse;     // 事件：帧写完成（toggle 同步后的单拍边沿）
     wire auto_tick;              // 事件：轮播定时器计满 1 秒
-    wire [1:0] next_from_current; // 查表：从当前图循环取"下一张"的逻辑索引
-    wire [1:0] prev_from_current; // 查表：从当前图循环取"上一张"的逻辑索引
+    wire [2:0] next_from_current; // {找到其他已加载图片, 索引}
+    wire [2:0] prev_from_current;
     wire [31:0] load_cluster_lut; // 查表：load_idx 对应图片的首簇号
     wire [31:0] load_size_lut;    // 查表：load_idx 对应图片的字节数
 
@@ -357,53 +358,40 @@ module sd_card_bmp_fat32 #(
         end
     endfunction
 
-    // ========================================================================
-    // function 2：下一张的逻辑索引（循环取模）
-    // ========================================================================
-    // 在有效图片数范围内循环取下一张；资源槽可能有空洞，所以实际加载索引
-    // 还要经过 cluster_lut 的紧凑映射（见 function 5）。
-    function [1:0] next_index_limited;
+    // 从已加载的紧凑图片索引中寻找另一张，不把尚在写入的帧交给显示端。
+    function [2:0] next_loaded;
         input [1:0] cur;
         input [2:0] count;
+        input [3:0] complete;
+        integer step;
+        integer candidate;
         begin
-            case (count)
-                3'd0,3'd1: next_index_limited = 2'd0;   // 0~1 张：永远是 0
-                3'd2: next_index_limited = (cur == 2'd1) ? 2'd0 : cur + 1'b1;
-                3'd3: next_index_limited = (cur == 2'd2) ? 2'd0 : cur + 1'b1;
-                default: next_index_limited = (cur == 2'd3) ? 2'd0 : cur + 1'b1;
-            endcase
+            next_loaded = {1'b0, cur};
+            for (step = 1; step < 4; step = step + 1) begin
+                candidate = cur + step;
+                if (candidate >= count)
+                    candidate = candidate - count;
+                if (step < count && !next_loaded[2] && complete[candidate])
+                    next_loaded = {1'b1, candidate[1:0]};
+            end
         end
     endfunction
 
-    // ========================================================================
-    // function 3：上一张的逻辑索引（循环取模）
-    // ========================================================================
-    // 与 function 2 对称：在有效图片数范围内循环取上一张。
-    function [1:0] prev_index_limited;
+    function [2:0] prev_loaded;
         input [1:0] cur;
         input [2:0] count;
+        input [3:0] complete;
+        integer step;
+        integer candidate;
         begin
-            case (count)
-                3'd0,3'd1: prev_index_limited = 2'd0;
-                3'd2: prev_index_limited = (cur == 0) ? 2'd1 : cur - 1'b1;
-                3'd3: prev_index_limited = (cur == 0) ? 2'd2 : cur - 1'b1;
-                default: prev_index_limited = (cur == 0) ? 2'd3 : cur - 1'b1;
-            endcase
-        end
-    endfunction
-
-    // ========================================================================
-    // function 4：双缓冲选择——下一帧写到"当前显示缓冲的对侧"
-    // ========================================================================
-    // 双缓冲核心：当前显示缓冲有效时，下一张写到另一个缓冲；这样正在显示的
-    // 画面永远不被正在写入的数据破坏，写完一整帧再原子切换显示缓冲。
-    function [1:0] next_buffer;
-        input [1:0] current;
-        input valid;
-        begin
-            if (!valid) next_buffer = 2'd0;    // 还没有有效画面：固定写 Buffer 0
-            else if (current == 2'd0) next_buffer = 2'd1;
-            else next_buffer = 2'd0;
+            prev_loaded = {1'b0, cur};
+            for (step = 1; step < 4; step = step + 1) begin
+                candidate = cur + count - step;
+                if (candidate >= count)
+                    candidate = candidate - count;
+                if (step < count && !prev_loaded[2] && complete[candidate])
+                    prev_loaded = {1'b1, candidate[1:0]};
+            end
         end
     endfunction
 
@@ -474,8 +462,8 @@ module sd_card_bmp_fat32 #(
     // ========================================================================
     // 函数输出组成的组合查表线，供下一次启动时采样。
     // 这些线无记忆：img_idx/load_idx 一翻新，输出当场跟着变（同拍可用）。
-    assign next_from_current = next_index_limited(img_idx, img_found_count);
-    assign prev_from_current = prev_index_limited(img_idx, img_found_count);
+    assign next_from_current = next_loaded(img_idx, img_found_count, image_complete);
+    assign prev_from_current = prev_loaded(img_idx, img_found_count, image_complete);
     assign load_cluster_lut = cluster_lut(load_idx);
     assign load_size_lut = size_lut(load_idx);
 
@@ -498,15 +486,16 @@ module sd_card_bmp_fat32 #(
             // 扫描/首图/轮播状态复位
             scan_kicked <= 1'b0;
             scan_completed <= 1'b0;
-            first_image_committed <= 1'b0;
+            image_complete <= 4'b0000;
+            preload_next_idx <= 3'd0;
+            preload_halted <= 1'b0;
             auto_play_en <= 1'b0;
             auto_cnt <= 32'd0;
             // 图片清单复位：0 张图、索引 0
             img_found_count <= 3'd0;
             img_idx <= 2'd0;
             load_idx <= 2'd0;
-            // 双缓冲复位：都指向 Buffer 0
-            pending_buf_idx <= 2'd0;
+            // 四个固定缓冲复位：首图默认使用 Buffer 0
             write_buf_idx <= 2'd0;
             disp_buf_idx <= 2'd0;
             // 资源表复位（首簇/大小全 0、无有效槽）
@@ -547,7 +536,9 @@ module sd_card_bmp_fat32 #(
                 // SD 尚未初始化时，清除所有业务状态。初始化完成后才允许扫描。
                 scan_kicked <= 1'b0;
                 scan_completed <= 1'b0;
-                first_image_committed <= 1'b0;
+                image_complete <= 4'b0000;
+                preload_next_idx <= 3'd0;
+                preload_halted <= 1'b0;
                 auto_play_en <= 1'b0;
                 auto_cnt <= 0;
                 img_found_count <= 0;
@@ -597,6 +588,9 @@ module sd_card_bmp_fat32 #(
                     img_size3 <= resource3_size;
                     image_resource_valid <= resource_valid;
                     img_found_count <= resource_count(resource_valid);
+                    preload_next_idx <= 3'd0;
+                    image_complete <= 4'b0000;
+                    preload_halted <= 1'b0;
                     last_error <= scan_error;
                 end
 
@@ -610,7 +604,9 @@ module sd_card_bmp_fat32 #(
                     scan_completed <= 1'b0;
                     img_found_count <= 0;
                     display_valid <= 1'b0;           // 扫描期间保持黑屏
-                    first_image_committed <= 1'b0;
+                    image_complete <= 4'b0000;
+                    preload_next_idx <= 3'd0;
+                    preload_halted <= 1'b0;
                     last_error <= 0;
                 end
 
@@ -627,10 +623,11 @@ module sd_card_bmp_fat32 #(
                             // 读成功：记下"文件完成"事件，继续等帧写完成
                             source_done_seen <= 1'b1;
                         end else begin
-                            // 读失败：整个事务作废，不切显示、报错误码
+                            // 写状态机可能仍在等像素；不再启动下一笔，避免混帧。
                             load_busy <= 1'b0;
                             source_done_seen <= 1'b0;
                             write_done_seen <= 1'b0;
+                            preload_halted <= 1'b1;
                             last_error <= source_load_error;
                         end
                     end else if (load_timeout_cnt >= LOAD_TIMEOUT_CYCLES) begin
@@ -640,6 +637,7 @@ module sd_card_bmp_fat32 #(
                         source_done_seen <= 0;
                         write_done_seen <= 0;
                         load_abort_pulse <= 1'b1;
+                        preload_halted <= 1'b1;
                         last_error <= 8'he0;         // e0 = 超时错误码
                     end else begin
                         load_timeout_cnt <= load_timeout_cnt + 1'b1;
@@ -649,7 +647,7 @@ module sd_card_bmp_fat32 #(
                 end
 
                 // --------------------------------------------------------------
-                // (g) 双事件汇合：文件读完 + 帧写完 → 切换显示缓冲
+                // (g) 双事件汇合：文件读完 + 帧写完 → 标记固定缓冲可显示
                 // --------------------------------------------------------------
                 if (load_busy && source_load_done && source_load_error == 0) begin
                     // source_load_done 表示解码器已经把文件字节读完；
@@ -662,20 +660,24 @@ module sd_card_bmp_fat32 #(
                 // 两个事件可以任意先后到达，使用"当前值或本拍事件"判断，
                 // 避免非阻塞赋值延后一拍造成提交条件漏检。
                 // 文件源完成与帧写完成是两个并发事件，任意先后都可以；只有
-                // 两者都见到才切换显示缓冲。这是典型的"事件汇合"设计。
+                // 两者都见到才允许显示该缓存。这是典型的"事件汇合"设计。
                 if (load_busy &&
                     (source_done_seen ||
                      (source_load_done && source_load_error == 0)) &&
                     (write_done_seen || write_finish_pulse)) begin
-                    // 汇合达成：整笔"加载一张图"业务成功结束
+                    // 图片和 buffer 使用同一个紧凑索引，后续不再覆盖它。
                     load_busy <= 1'b0;
                     source_done_seen <= 1'b0;
                     write_done_seen <= 1'b0;
                     load_timeout_cnt <= 0;
-                    disp_buf_idx <= pending_buf_idx; // 原子切换显示缓冲（关键动作）
-                    img_idx <= load_idx;             // 更新"当前图片"索引
-                    display_valid <= 1'b1;
-                    first_image_committed <= 1'b1;
+                    image_complete[load_idx] <= 1'b1;
+                    preload_next_idx <= {1'b0, load_idx} + 3'd1;
+                    if (!display_valid) begin
+                        // 首张完整图片立即可显示，其余图片继续在后台预加载。
+                        disp_buf_idx <= load_idx;
+                        img_idx <= load_idx;
+                        display_valid <= 1'b1;
+                    end
                     last_error <= 0;
                 end
 
@@ -683,8 +685,7 @@ module sd_card_bmp_fat32 #(
                 // (h) 按键解析 + (i) 加载仲裁链（只有扫描完成且有图才处理）
                 // --------------------------------------------------------------
                 if (scan_completed && img_found_count != 0) begin
-                    // 扫描成功后才处理按键和自动轮播。请求在加载期间挂起，
-                    // 防止多个按键事件直接重入同一个 SD/FAT 事务。
+                    // 按键只选择已驻留图片，不再发起 SD 文件读取。
 
                     // ---- (h1) 按键事件 → 挂起请求 ----
                     if (key_next_press)
@@ -719,64 +720,39 @@ module sd_card_bmp_fat32 #(
                     end
 
                     // ---- (h3) 轮播定时器：只在有画面、不忙、开启时计时 ----
-                    if (auto_play_en && display_valid && !load_busy && img_found_count > 1) begin
-                        // 自动轮播只在当前画面已经有效且没有加载事务时计时。
+                    if (auto_play_en && display_valid && img_found_count > 1) begin
                         if (auto_tick) auto_cnt <= 0;    // 计满 1 秒清零重计
                         else auto_cnt <= auto_cnt + 1'b1;
                     end else begin
                         auto_cnt <= 0;                   // 否则暂停并清零
                     end
 
-                    // ---- (i) 仲裁链：首图/下一张/上一张/自动轮播，四选一 ----
-                    // 同一拍只启动一个 load_start_pulse，优先级通过 if/else if
-                    // 明确表达。每个分支都同时做四件事：
-                    //   ① 更新 load_idx（选哪张图）
-                    //   ② 更新 pending_buf_idx/write_buf_idx（写哪个缓冲=对侧）
-                    //   ③ 发 load_start_pulse + 置 load_busy（启动事务）
-                    //   ④ 清 source_done_seen/write_done_seen（准备新一轮汇合）
-                    // 共同门控：source_ready（SD 通道空闲）且 !load_busy（无进行中事务）
-                    if (!first_image_committed && source_ready && !load_busy) begin
-                        // 分支 1（最高优先）：首图——固定加载逻辑索引 0，
-                        // 固定写 Buffer 0。display_valid 尚为 0，不要求已有画面。
-                        load_idx <= 0;
-                        pending_buf_idx <= 0;
-                        write_buf_idx <= 0;
+                    // 文件读取只有这一处启动：按目录中的紧凑索引依次预加载。
+                    if (source_ready && !load_busy && !preload_halted &&
+                        preload_next_idx < img_found_count) begin
+                        load_idx <= preload_next_idx[1:0];
+                        write_buf_idx <= preload_next_idx[1:0];
                         load_start_pulse <= 1'b1;
                         load_busy <= 1'b1;
                         source_done_seen <= 0;
                         write_done_seen <= 0;
-                    end else if (display_valid && source_ready && !load_busy &&
-                                 next_req_pending) begin
-                        // 分支 2：下一张（key_next 请求挂起）
-                        load_idx <= next_from_current;
-                        pending_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        write_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        load_start_pulse <= 1'b1;
-                        load_busy <= 1'b1;
-                        next_req_pending <= 0;       // 消费挂起请求
-                        source_done_seen <= 0;
-                        write_done_seen <= 0;
-                    end else if (display_valid && source_ready && !load_busy &&
-                                 prev_req_pending) begin
-                        // 分支 3：上一张（长按自动键产生的请求挂起）
-                        load_idx <= prev_from_current;
-                        pending_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        write_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        load_start_pulse <= 1'b1;
-                        load_busy <= 1'b1;
-                        prev_req_pending <= 0;       // 消费挂起请求
-                        source_done_seen <= 0;
-                        write_done_seen <= 0;
-                    end else if (display_valid && source_ready && !load_busy &&
-                                 auto_play_en && auto_tick && img_found_count > 1) begin
-                        // 分支 4（最低优先）：自动轮播——每秒自动切下一张
-                        load_idx <= next_from_current;
-                        pending_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        write_buf_idx <= next_buffer(disp_buf_idx, display_valid);
-                        load_start_pulse <= 1'b1;
-                        load_busy <= 1'b1;
-                        source_done_seen <= 0;
-                        write_done_seen <= 0;
+                    end
+
+                    // 显示选择和预加载并行；没有其他已完成图片时保留请求。
+                    if (display_valid && next_req_pending && next_from_current[2]) begin
+                        img_idx <= next_from_current[1:0];
+                        disp_buf_idx <= next_from_current[1:0];
+                        next_req_pending <= 1'b0;
+                        auto_cnt <= 0;
+                    end else if (display_valid && prev_req_pending && prev_from_current[2]) begin
+                        img_idx <= prev_from_current[1:0];
+                        disp_buf_idx <= prev_from_current[1:0];
+                        prev_req_pending <= 1'b0;
+                        auto_cnt <= 0;
+                    end else if (display_valid && auto_play_en && auto_tick &&
+                                 next_from_current[2]) begin
+                        img_idx <= next_from_current[1:0];
+                        disp_buf_idx <= next_from_current[1:0];
                         auto_cnt <= 0;               // 重启 1 秒计时
                     end
                 end

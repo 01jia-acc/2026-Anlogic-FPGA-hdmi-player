@@ -91,11 +91,15 @@ parameter ADDR_BITS     = 21;             // 参数：SDRAM 应用地址位宽
 parameter BUSRT_BITS    = 10;             // 当前顶层未使用，保留原工程参数
 parameter FRAME_PIXELS  = 24'd307200;     // 640*480，单位是 32 bit 像素字
 
-// 两个帧缓冲区的首地址。这里是 SDRAM 应用接口的“字地址”，不是字节地址。
+// 四个帧缓冲区的首地址。这里是 SDRAM 应用接口的“字地址”，不是字节地址。
 //   Buffer 0：0              ~ 307199
 //   Buffer 1：307200         ~ 614399
+//   Buffer 2：614400         ~ 921599
+//   Buffer 3：921600         ~ 1228799
 parameter BUF0_ADDR     = 24'd0;          // 参数：Buffer 0 的首字地址
 parameter BUF1_ADDR     = FRAME_PIXELS;   // 参数：Buffer 1 的首字地址
+parameter BUF2_ADDR     = FRAME_PIXELS * 2;
+parameter BUF3_ADDR     = FRAME_PIXELS * 3;
 
 // SDRAM 控制器状态：初始化完成、刷新有效、控制器忙。
 wire Sdr_init_done;       // 【SDRAM 输出→top/frame_read_write】初始化完成
@@ -161,9 +165,13 @@ wire        sd_card_write_req_ack;    // 【frame_read_write 输出→sd_card_bm
 wire        frame_write_finish;       // 【frame_read_write 输出→top】整帧写入完成脉冲
 reg         frame_write_toggle_mem;   // 【top 输出→sd_card_bmp】跨域的整帧完成事件
 
-// 双缓冲索引：写入哪一块、显示哪一块。
+// 四帧缓存索引：写入哪一块、期望显示哪一块。
 wire [1:0]  write_buf_idx;            // 【sd_card_bmp 输出→frame_read_write】写缓冲区编号
-wire [1:0]  disp_buf_idx;             // 【sd_card_bmp 输出→frame_read_write】显示缓冲区编号
+wire [1:0]  disp_buf_idx;             // 【sd_card_bmp 输出】期望显示的缓冲区编号
+reg  [1:0]  disp_buf_sync1, disp_buf_sync2;
+reg  [1:0]  video_disp_buf_idx;       // 视频帧请求边界锁存的实际读取缓冲区
+reg         video_read_req_d;
+wire [1:0]  video_read_buf_idx;
 
 // frame_read_write 与 SDRAM 控制器之间的应用接口。
 // App_wr_*：应用侧写 SDRAM；App_rd_*：应用侧读 SDRAM；
@@ -236,6 +244,27 @@ always @(posedge clk) begin
 end
 
 assign rst_all = rst_all_reg;
+
+// 图片选择在 SD 时钟域产生；只在下一次视频读帧请求到来时提交。
+// read_req 是保持到 ack 的电平，因此只取上升沿，防止一帧内重复改地址。
+// 请求刚升高时，mem_clk 可能比下一个 video_clk 边沿先采样请求；此时先
+// 前馈已同步的索引，随后使用锁存值，保证请求和索引同时抵达读侧。
+assign video_read_buf_idx = (video_read_req && !video_read_req_d) ?
+                            disp_buf_sync2 : video_disp_buf_idx;
+always @(posedge video_clk or posedge rst_all) begin
+    if (rst_all) begin
+        disp_buf_sync1 <= 2'd0;
+        disp_buf_sync2 <= 2'd0;
+        video_disp_buf_idx <= 2'd0;
+        video_read_req_d <= 1'b0;
+    end else begin
+        disp_buf_sync1 <= disp_buf_idx;
+        disp_buf_sync2 <= disp_buf_sync1;
+        video_read_req_d <= video_read_req;
+        if (video_read_req && !video_read_req_d)
+            video_disp_buf_idx <= disp_buf_sync2;
+    end
+end
 
 // ============================================================================
 // 时钟产生
@@ -477,9 +506,9 @@ frame_read_write #(
     .read_finish       (),                   // 输出：整帧读完，本工程未使用
     .read_addr_0       (BUF0_ADDR),          // 输入：Buffer 0 首地址
     .read_addr_1       (BUF1_ADDR),          // 输入：Buffer 1 首地址
-    .read_addr_2       (24'd0),              // 输入：备用地址槽 2，未使用
-    .read_addr_3       (24'd0),              // 输入：备用地址槽 3，未使用
-    .read_addr_index   (disp_buf_idx),       // 输入：选择当前显示缓冲区
+    .read_addr_2       (BUF2_ADDR),          // 输入：Buffer 2 首地址
+    .read_addr_3       (BUF3_ADDR),          // 输入：Buffer 3 首地址
+    .read_addr_index   (video_read_buf_idx), // 输入：帧请求边界固定的读缓冲区
     .read_len          (FRAME_PIXELS),       // 输入：读取 307200 个像素字
     .read_en           (video_read_en),      // 输入：video_clk 域逐像素读取
     .read_data         (video_read_data),    // 输出→video_delay：读出的像素字
@@ -497,8 +526,8 @@ frame_read_write #(
     .write_finish      (frame_write_finish), // 输出→top：整帧写完脉冲
     .write_addr_0      (BUF0_ADDR),          // 输入：Buffer 0 首地址
     .write_addr_1      (BUF1_ADDR),          // 输入：Buffer 1 首地址
-    .write_addr_2      (24'd0),              // 输入：备用地址槽 2，未使用
-    .write_addr_3      (24'd0),              // 输入：备用地址槽 3，未使用
+    .write_addr_2      (BUF2_ADDR),          // 输入：Buffer 2 首地址
+    .write_addr_3      (BUF3_ADDR),          // 输入：Buffer 3 首地址
     .write_addr_index  (write_buf_idx),      // 输入：选择当前写入缓冲区
     .write_len         (FRAME_PIXELS),       // 输入：写入 307200 个像素字
     .write_en          (sd_card_write_en),   // 输入：SD 侧当前像素有效
