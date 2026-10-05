@@ -12,6 +12,8 @@ module sd_card_bmp #(
     input  [15:0]               bmp_width,
     input  [15:0]               bmp_height,
     output reg                  display_valid,
+    output      [1:0]           display_image_id,
+    output reg                  display_commit_toggle,
     output      [3:0]           state_code,
 
     input                       write_finish_toggle,
@@ -84,6 +86,7 @@ assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
 assign next_from_current = next_index_limited(img_idx, img_found_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
 assign state_code = state_code_i;
+assign display_image_id = img_idx;
 
 key_press_debounce #(
     .CLK_FREQ_HZ (CLK_FREQ_HZ),
@@ -172,6 +175,7 @@ always @(posedge clk or posedge rst) begin
         source_done_seen      <= 1'b0;
         write_done_seen       <= 1'b0;
         display_valid         <= 1'b0;
+        display_commit_toggle <= 1'b0;
     end else begin
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
@@ -231,6 +235,7 @@ always @(posedge clk or posedge rst) begin
                 write_done_seen       <= 1'b0;
                 disp_buf_idx          <= pending_buf_idx;
                 img_idx               <= load_idx;
+                display_commit_toggle <= ~display_commit_toggle;
                 display_valid         <= 1'b1;
                 first_image_committed <= 1'b1;
             end else if (load_busy) begin

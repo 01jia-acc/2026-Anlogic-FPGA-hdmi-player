@@ -31,6 +31,10 @@ parameter BUSRT_BITS    = 10;
 parameter FRAME_PIXELS  = 24'd307200;   // 640*480
 parameter BUF0_ADDR     = 24'd0;
 parameter BUF1_ADDR     = FRAME_PIXELS;
+// 0: test sine until the first image, then image-linked arpeggios.
+// 1: continuous 3 kHz sine for HDMI audio bring-up.
+parameter AUDIO_TEST_ONLY = 0;
+parameter [7:0] AUDIO_VOLUME = 8'd192;
 
 wire Sdr_init_done;
 wire Sdr_init_ref_vld;
@@ -49,6 +53,8 @@ wire de;
 wire [23:0] vout_data_raw;
 wire [23:0] vout_data;
 wire        display_valid;
+wire [1:0]  display_image_id;
+wire        display_commit_toggle;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
@@ -96,6 +102,13 @@ wire [9:0]  tmds_ch0_data;
 wire [9:0]  tmds_ch1_data;
 wire [9:0]  tmds_ch2_data;
 wire [9:0]  tmds_clk_data;
+
+wire        audio_valid;
+wire [23:0] audio_left_data;
+wire [23:0] audio_right_data;
+wire        acr_valid;
+wire [19:0] acr_cts;
+wire [19:0] acr_n;
 
 // 统一复位：TF 图像链路 + HDMI 链路
 wire sys_pll_lock;
@@ -169,6 +182,8 @@ sd_card_bmp #(
     .bmp_width         (16'd640),
     .bmp_height        (16'd480),
     .display_valid     (display_valid),
+    .display_image_id  (display_image_id),
+    .display_commit_toggle(display_commit_toggle),
 
     .write_finish_toggle(frame_write_toggle_mem),
     .write_buf_idx     (write_buf_idx),
@@ -317,6 +332,27 @@ startup_pulse #(
     .O_pulse (edid_trig)
 );
 
+// ===================== 像素时钟域 PCM / ACR 音频 =====================
+// Adapt the lesson's sine/DDS sources to the existing transmitter's PCM
+// strobe interface. No I2S serializer or independent audio PLL is needed.
+media_hdmi_audio_bridge #(
+    .CLOCK_HZ          (25_000_000),
+    .TEST_ONLY         (AUDIO_TEST_ONLY),
+    .VOLUME            (AUDIO_VOLUME)
+) u_media_hdmi_audio_bridge (
+    .pixel_clk         (video_clk),
+    .rst               (rst_all),
+    .display_valid_sd  (display_valid),
+    .media_id_sd       (display_image_id),
+    .commit_toggle_sd  (display_commit_toggle),
+    .audio_valid       (audio_valid),
+    .audio_left_data   (audio_left_data),
+    .audio_right_data  (audio_right_data),
+    .acr_valid         (acr_valid),
+    .acr_cts           (acr_cts),
+    .acr_n             (acr_n)
+);
+
 // ===================== HDMI 1.4b 发射 =====================
 hdmi_1_4b_transmitter_core_wrapper #(
     .DEVICE                 ( "EG"       ),
@@ -348,12 +384,12 @@ hdmi_1_4b_transmitter_core_wrapper #(
     .I_axis_s_data      (axis_s_data),
     .O_axis_s_ready     (axis_s_ready),
 
-    .I_audio_valid      (1'b0),
-    .I_audio_left_data  (24'd0),
-    .I_audio_right_data (24'd0),
-    .I_acr_valid        (1'b0),
-    .I_acr_cts          (20'd0),
-    .I_acr_n            (20'd0),
+    .I_audio_valid      (audio_valid),
+    .I_audio_left_data  (audio_left_data),
+    .I_audio_right_data (audio_right_data),
+    .I_acr_valid        (acr_valid),
+    .I_acr_cts          (acr_cts),
+    .I_acr_n            (acr_n),
 
     .O_video_locked     (),
     .O_ddc_scl          (HDMI_DDC_SCL),

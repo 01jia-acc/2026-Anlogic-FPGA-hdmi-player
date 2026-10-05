@@ -13,6 +13,7 @@ settings.cfg
 .temp.f
 .lock.f
 .recent_user_depot.ini
+tests/build/
 
 # ===== Python 缓存 =====
 __pycache__/

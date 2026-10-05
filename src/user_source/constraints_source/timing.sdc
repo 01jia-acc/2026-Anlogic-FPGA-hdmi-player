@@ -6,7 +6,7 @@
 # 合并原则：
 # 1) 保留 top.sdc 里的系统主时钟与 derive_clocks
 # 2) 把 timing(2).sdc 里的 pixel/serial 时钟改成整合工程实际名字
-# 3) 增加 hdmi_5x_clk / audio_mclk 的命名
+# 3) 命名 hdmi_5x_clk；音频复用 video_clk，不增加音频时钟
 # 4) 不再对内部 net 直接 create_clock，避免和 derive_clocks 重复
 # ============================================================
 
@@ -26,7 +26,7 @@ derive_clocks
 #    下面这些路径是按你当前工程实例名写的：
 #      sys_pll      -> sys_pll_m0
 #      video_pll    -> video_pll_m0
-#      音频 PLL     -> u_audio_pll
+#      音频采样使能来自 video_clk，不使用独立音频 PLL
 #
 #    如果综合后实例路径略有不同，就按 Timing Analyzer 里的实际 pin 路径改。
 # ------------------------------------------------------------
