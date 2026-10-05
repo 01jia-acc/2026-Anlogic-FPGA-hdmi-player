@@ -115,11 +115,11 @@ wire video_clk;           // 【video_pll 输出→视频链路】像素时钟�
 wire hdmi_5x_clk;         // 【video_pll 输出→HDMI PHY】高速串行时钟
 
 // 延迟对齐后的视频时序：hs/vs/de 与 vout_data_raw 同步。
-wire hs;                  // 【video_delay 输出→video_rgb_to_axis】延迟后的行同步
-wire vs;                  // 【video_delay 输出→video_rgb_to_axis】延迟后的场同步
-wire de;                  // 【video_delay 输出→video_rgb_to_axis】延迟后的有效显示区
+wire hs;                  // 【视频流水线输出→video_rgb_to_axis】延迟后的行同步
+wire vs;                  // 【视频流水线输出→video_rgb_to_axis】延迟后的场同步
+wire de;                  // 【视频流水线输出→video_rgb_to_axis】延迟后的有效显示区
 
-wire [23:0] vout_data_raw;  // 【video_delay 输出→top】已与 de 对齐的 RGB888
+wire [23:0] vout_data_raw;  // 【视频流水线输出→top】已与 de 对齐的 RGB888
 wire [23:0] vout_data;      // 【top 输出→video_rgb_to_axis】最终 RGB，未提交时为黑色
 wire        display_valid;  // 【sd_card_bmp 输出→top】第一张图完整提交前为 0
 
@@ -153,7 +153,7 @@ wire        uart_rx_valid;
 wire        video_read_req;      // 【video_timing 输出→frame_read_write】一帧读请求
 wire        video_read_req_ack;  // 【frame_read_write 输出→video_timing】读请求应答
 wire        video_read_en;       // 【video_delay 输出→frame_read_write】取一个像素
-wire [31:0] video_read_data;     // 【frame_read_write 输出→video_delay】32 bit 像素字
+wire [31:0] video_read_data;     // 【frame_read_write 输出→video_delay】32 bit 像素
 
 // TF 写帧接口，主要由 sd_card_clk 域产生。
 // write_req/ack 是“一整帧写入任务”的握手，不是单像素握手。
@@ -184,11 +184,28 @@ wire App_wr_en;                       // 【frame_read_write 输出→sdram】�
 wire [ADDR_BITS-1:0] App_wr_addr;     // 【frame_read_write 输出→sdram】写地址
 wire [MEM_DATA_BITS-1:0] App_wr_din;  // 【frame_read_write 输出→sdram】写入的 32 bit 数据
 wire [3:0] App_wr_dm;                 // 【frame_read_write 输出→sdram】4 个字节的写屏蔽
+wire frame_write_busy;                // 【frame_read_write 输出→media_frame_reader】写侧占用 SDRAM
 
 // video_timing_data 产生的原始时序，先进入 video_delay 做数据对齐。
 wire hs_0;                            // 【video_timing 输出→video_delay】原始行同步
 wire vs_0;                            // 【video_timing 输出→video_delay】原始场同步
 wire de_0;                            // 【video_timing 输出→video_delay】原始有效区
+
+// 新读侧的状态和视频域输出。
+wire        reader_frame_start;
+wire        reader_pixel_consume;
+wire [23:0] reader_pixel_rgb;
+wire        reader_pixel_valid;
+wire        reader_underflow;
+wire        reader_busy;
+wire        reader_bus_busy;
+wire [1:0]  reader_index;
+wire [7:0]  reader_error;
+reg  [20:0] reader_hs_pipe;
+reg  [20:0] reader_vs_pipe;
+reg  [20:0] reader_de_pipe;
+reg  [23:0] reader_rgb_pipe [0:20];
+integer reader_pipe_i;
 
 // HDMI 1.4b 视频 AXI-Stream 输入信号。
 // video_rgb_to_axis_640x480 把 RGB + vs/de 转换成这些信号。
@@ -440,28 +457,79 @@ video_timing_data video_timing_data_m0(
     .read_req_ack      (video_read_req_ack), // 输入：帧缓存接受读请求
     .hs                (hs_0),               // 输出→video_delay：原始行同步
     .vs                (vs_0),               // 输出→video_delay：原始场同步
-    .de                (de_0)                // 输出→video_delay：有效显示区
+    .de                (de_0)                // 输出→video_delay：原始有效显示区
 );
 
+// 读请求由 media_frame_reader 接管；它把 read_req 的上升沿转换为帧加载事件。
+// 第一张图片尚未完成 SDRAM 写入前，不能读取 Buffer 0。否则 reader_busy
+// 会暂停写侧，BMP 加载可能因长期没有写进展而超时并使 state_code=F。
+assign video_read_req_ack = 1'b1;
+
 // ============================================================================
-// 视频数据延迟对齐
+// 新读侧：SDRAM -> 异步 FIFO -> 两级预取 -> video_clk
 // ============================================================================
-// SDRAM/FIFO 的读数据存在固定延迟，不能直接与原始 de_0 同拍使用。
-// video_delay 同时延迟 hs/vs/de 和 RGB 数据，使有效像素落在正确位置。
-// video_read_data[31:8] 是 {R,G,B}，低 8 bit 是填充位。
-video_delay video_delay_m0(
-    .video_clk         (video_clk),          // 输入：视频像素时钟
-    .rst               (rst_all),            // 输入：统一高有效复位
-    .read_en           (video_read_en),      // 输出→frame_read_write：取一个像素
-    .read_data         (video_read_data[31:8]), // 输入：32 bit 像素的 RGB 高 24 bit
-    .hs                (hs_0),               // 输入：原始行同步
-    .vs                (vs_0),               // 输入：原始场同步
-    .de                (de_0),               // 输入：原始有效显示区
-    .hs_r              (hs),                 // 输出→AXIS：延迟后的行同步
-    .vs_r              (vs),                 // 输出→AXIS：延迟后的场同步
-    .de_r              (de),                 // 输出→AXIS：延迟后的有效显示区
-    .vout_data         (vout_data_raw)       // 输出→top：与 de 对齐的 RGB888
+// video_timing_data 的 read_req 会保持到应答。上升沿转换为新 reader 的
+// 单周期 frame_start，reader 在下一拍锁存已经同步到 video_clk 的 buffer 索引。
+assign reader_frame_start   = video_read_req && !video_read_req_d && display_valid;
+assign reader_pixel_consume = de_0;
+
+media_frame_reader #(
+    .ADDR_WIDTH          (ADDR_BITS),
+    .IMAGE_WORDS         (FRAME_PIXELS),
+    .FIFO_DEPTH          (512),
+    .FIFO_MARGIN         (8),
+    .BURST_SIZE          (128),
+    .BURST_GAP_CYCLES    (12),
+    .MAX_INFLIGHT_BURSTS (2)
+) u_media_frame_reader (
+    .mem_clk             (ext_mem_clk),
+    .mem_rst_n           (~rst_all),
+    .controller_init_done(Sdr_init_done),
+    .controller_busy     (Sdr_busy),
+    .refresh_active      (Sdr_init_ref_vld),
+    .external_write_busy (frame_write_busy),
+    .app_rd_en           (App_rd_en),
+    .app_rd_addr         (App_rd_addr),
+    .sdram_rd_valid      (Sdr_rd_en),
+    .sdram_rd_data       (Sdr_rd_dout),
+    .pix_clk             (video_clk),
+    .pix_rst_n           (~rst_all),
+    .frame_start         (reader_frame_start),
+    .active_index        (video_read_buf_idx),
+    .pixel_consume       (reader_pixel_consume),
+    .pixel_rgb           (reader_pixel_rgb),
+    .pixel_valid         (reader_pixel_valid),
+    .underflow           (reader_underflow),
+    .reader_busy         (reader_busy),
+    .reader_bus_busy     (reader_bus_busy),
+    .frame_read_done     (),
+    .reader_index        (reader_index),
+    .reader_error        (reader_error)
 );
+
+// reader_pixel_rgb 已经位于 video_clk 域，但 FIFO 可能在帧开始后暂时没有
+// 数据。无效周期送黑色，避免把 FIFO 上一次残留值显示成雪花。
+always @(posedge video_clk or posedge rst_all) begin
+    if (rst_all) begin
+        reader_hs_pipe  <= 21'd0;
+        reader_vs_pipe  <= 21'd0;
+        reader_de_pipe  <= 21'd0;
+        for (reader_pipe_i = 0; reader_pipe_i <= 20; reader_pipe_i = reader_pipe_i + 1)
+            reader_rgb_pipe[reader_pipe_i] <= 24'd0;
+    end else begin
+        reader_hs_pipe <= {reader_hs_pipe[19:0], hs_0};
+        reader_vs_pipe <= {reader_vs_pipe[19:0], vs_0};
+        reader_de_pipe <= {reader_de_pipe[19:0], de_0};
+        reader_rgb_pipe[0] <= reader_pixel_valid ? reader_pixel_rgb : 24'd0;
+        for (reader_pipe_i = 1; reader_pipe_i <= 20; reader_pipe_i = reader_pipe_i + 1)
+            reader_rgb_pipe[reader_pipe_i] <= reader_rgb_pipe[reader_pipe_i-1];
+    end
+end
+
+assign hs = reader_hs_pipe[20];
+assign vs = reader_vs_pipe[20];
+assign de = reader_de_pipe[20];
+assign vout_data_raw = reader_rgb_pipe[20];
 
 // 第一张图完成“源数据读取 + SDRAM 整帧写入”之前输出黑色，
 // 防止 HDMI 在帧缓存尚未准备好时显示随机数据。
@@ -485,24 +553,26 @@ assign vout_data = display_valid ? vout_data_raw : 24'd0;
 frame_read_write #(
     .WRITE_V_FLIP     (1),   // 参数：写入 SDRAM 时垂直翻转 BMP 行
     .FRAME_WIDTH      (640), // 参数：一行像素数
-    .FRAME_HEIGHT     (480)  // 参数：总行数
+    .FRAME_HEIGHT     (480), // 参数：总行数
+    .ENABLE_READ      (0)    // 参数：旧读侧关闭，由 media_frame_reader 接管
 ) frame_read_write_m0(
     .mem_clk           (ext_mem_clk),        // 输入：FIFO/SDRAM 控制时钟
     .rst               (rst_all),            // 输入：统一高有效复位
     .Sdr_init_done     (Sdr_init_done),      // 输入←sdram：初始化完成
     .Sdr_init_ref_vld  (Sdr_init_ref_vld),   // 输入←sdram：刷新状态
     .Sdr_busy          (Sdr_busy),           // 输入←sdram：控制器忙
+    .external_read_busy(reader_bus_busy),    // 输入：新 reader 实际占用 SDRAM 时暂停写突发
 
     // ---------- SDRAM 读应用接口 ----------
-    .App_rd_en         (App_rd_en),          // 输出→sdram：请求读一个字
-    .App_rd_addr       (App_rd_addr),        // 输出→sdram：读地址
+    .App_rd_en         (),                   // 旧读侧关闭
+    .App_rd_addr       (),                   // 旧读侧关闭
     .Sdr_rd_en         (Sdr_rd_en),          // 输入←sdram：返回数据有效
     .Sdr_rd_dout       (Sdr_rd_dout),        // 输入←sdram：返回的 32 bit 数据
 
     // ---------- video_clk 域的读帧接口 ----------
     .read_clk          (video_clk),          // 输入：HDMI 像素时钟
     .read_req          (video_read_req),     // 输入：请求读取当前显示帧
-    .read_req_ack      (video_read_req_ack), // 输出：读请求应答
+    .read_req_ack      (),                   // 旧读侧关闭
     .read_finish       (),                   // 输出：整帧读完，本工程未使用
     .read_addr_0       (BUF0_ADDR),          // 输入：Buffer 0 首地址
     .read_addr_1       (BUF1_ADDR),          // 输入：Buffer 1 首地址
@@ -510,8 +580,8 @@ frame_read_write #(
     .read_addr_3       (BUF3_ADDR),          // 输入：Buffer 3 首地址
     .read_addr_index   (video_read_buf_idx), // 输入：帧请求边界固定的读缓冲区
     .read_len          (FRAME_PIXELS),       // 输入：读取 307200 个像素字
-    .read_en           (video_read_en),      // 输入：video_clk 域逐像素读取
-    .read_data         (video_read_data),    // 输出→video_delay：读出的像素字
+    .read_en           (1'b0),               // 旧读侧关闭
+    .read_data         (),                   // 旧读侧关闭
 
     // ---------- SDRAM 写应用接口 ----------
     .App_wr_en         (App_wr_en),          // 输出→sdram：写一个字使能
@@ -531,7 +601,8 @@ frame_read_write #(
     .write_addr_index  (write_buf_idx),      // 输入：选择当前写入缓冲区
     .write_len         (FRAME_PIXELS),       // 输入：写入 307200 个像素字
     .write_en          (sd_card_write_en),   // 输入：SD 侧当前像素有效
-    .write_data        (sd_card_write_data)  // 输入：SD 侧送来的 32 bit 像素
+    .write_data        (sd_card_write_data), // 输入：SD 侧送来的 32 bit 像素
+    .write_busy        (frame_write_busy)    // 输出：写侧占用 SDRAM
 );
 
 // ============================================================================

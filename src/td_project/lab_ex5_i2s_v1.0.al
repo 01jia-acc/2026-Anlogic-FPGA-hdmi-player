@@ -88,6 +88,7 @@
             </File>
             <File Path="../user_source/hdl_source/SD/frame_fifo_read.v">
                 <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
@@ -130,6 +131,7 @@
             </File>
             <File Path="../user_source/hdl_source/SD/video_delay.v">
                 <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
@@ -319,6 +321,22 @@
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="44"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/SD/fifo_prefetch_2.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="45"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/SD/media_frame_reader.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="46"/>
                 </FileInfo>
             </File>
         </Verilog>

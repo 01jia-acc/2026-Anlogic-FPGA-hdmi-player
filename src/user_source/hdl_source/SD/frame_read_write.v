@@ -34,7 +34,8 @@ module frame_read_write
 	parameter BURST_SIZE             = 256,     // 一次突发读/写的字数（FIFO 攒够这么多才动手）
 	parameter WRITE_V_FLIP           = 1,       // =1：写 SDRAM 时做垂直翻转（BMP 文件自底向上存储，翻转后显示才正立）
 	parameter FRAME_WIDTH            = 640,     // 帧宽（像素）
-	parameter FRAME_HEIGHT           = 480      // 帧高（行数）
+	parameter FRAME_HEIGHT           = 480,     // 帧高（行数）
+	parameter ENABLE_READ            = 1        // =0 时仅保留写通道
 )
 (
 	input                            rst,                  // 高有效复位
@@ -42,6 +43,7 @@ module frame_read_write
 	input							 Sdr_init_done,        // SDRAM 初始化完成标志
 	input							 Sdr_init_ref_vld,     // SDRAM 初始化/刷新有效（本设计未直接使用）
     input							 Sdr_busy,             // SDRAM 控制器忙标志
+    input                            external_read_busy,    // 外部新读侧占用 SDRAM 的标志
 
     // ------------------------------------------------------------------------
     // 以下为旧版"突发读写请求"接口，已被 App_xx 简化接口取代，保留作参考。
@@ -96,6 +98,7 @@ module frame_read_write
 	output[ADDR_BITS - 1:0]			 App_wr_addr,             // 写地址（由 frame_fifo_write 生成，含垂直翻转）
 	output[MEM_DATA_BITS - 1:0]	 App_wr_din,               // 写入 SDRAM 的数据（来自写 FIFO）
 	output[3:0]						 App_wr_dm,               // 字节写屏蔽：=0 表示 32 位全部写入
+	output                           write_busy,              // 写侧正在突发或已准备发起
 
 	// ------------------------------------------------------------------------
 	// 写通道与上游 BMP 解析器的接口
@@ -127,7 +130,10 @@ wire O_wr_busy;
 wire O_rd_busy;
 
 assign App_wr_busy = O_wr_busy; // 写通道忙标志直通（"正在突发写或即将发起"时置 1）
-assign App_rd_busy = O_rd_busy; // 读通道忙标志直通；因为写指令优先，写通道不需要关心读指令下个时钟是否到来
+assign write_busy = App_wr_busy;
+// ENABLE_READ=0 时关闭本模块旧读状态机，但仍把外部 reader 的占用状态
+// 反馈给写状态机，保证新旧读写通道不会同时访问 SDRAM。
+assign App_rd_busy = ENABLE_READ ? O_rd_busy : external_read_busy;
 assign App_wr_dm = 4'b0000;     // 写字节屏蔽全 0：每个 32 位字的 4 个字节全部写入
 
 // ----------------------------------------------------------------------------
@@ -194,6 +200,8 @@ frame_fifo_write_m0
 	.rdusedw                 	(rdusedw                  )  // 写 FIFO 水位
 );
 
+generate
+if (ENABLE_READ) begin : g_legacy_read
 // ----------------------------------------------------------------------------
 // 读通道 FIFO（异步）：SDRAM 读出的帧数据缓冲。
 //   写侧：mem_clk 域，SDRAM 控制器每返回一个字（Sdr_rd_en = 1）就写入；
@@ -255,5 +263,16 @@ frame_fifo_read_m0
 	.fifo_aclr                  (read_fifo_aclr           ), // 帧开始前清空读 FIFO
 	.wrusedw                	(wrusedw                  )  // 读 FIFO 水位
 );
+
+end else begin : g_read_disabled
+    // 读侧由 media_frame_reader 接管。旧读端口保持确定值，避免两个
+    // 读状态机同时驱动 SDRAM 应用读总线。
+    assign App_rd_en    = 1'b0;
+    assign App_rd_addr  = {ADDR_BITS{1'b0}};
+    assign read_req_ack = 1'b0;
+    assign read_finish  = 1'b0;
+    assign read_data    = {READ_DATA_BITS{1'b0}};
+end
+endgenerate
 
 endmodule
