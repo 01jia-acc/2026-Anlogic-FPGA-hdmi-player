@@ -76,6 +76,7 @@ module sd_fat32_image_source #(
     output wire        write_req,      // 电平："我要写一整帧"（保持到 write_req_ack）
     input  wire        write_req_ack,  // 输入：帧写端已清空 FIFO/锁存地址，可以灌
     output wire        write_en,       // =1 时 write_data 是一个有效像素
+    output wire        frame_commit,   // 事件：最后一个像素已经从解码器输出
     // 帧写端握手及 32 位像素数据（RGB888 + 低 8 位空置）。
     output wire [31:0] write_data,     // {decoder_pixel_rgb, 8'h00}
 
@@ -216,6 +217,9 @@ module sd_fat32_image_source #(
     assign write_req = (source_state == SOURCE_ACK);
     // 只有流传输阶段 + 解码器输出有效像素时，write_data 才有效。
     assign write_en = (source_state == SOURCE_STREAM) && decoder_pixel_valid;
+    // 这个事件来自 BMP 解码器，而不是“文件扇区读完”。
+    // 只有最后一个 RGB 像素已经产生后，写入器才允许提交整帧。
+    assign frame_commit = decoder_frame_commit;
     // 像素打包：RGB888 放高 24 位，低 8 位填 0，凑成 32 位存储字。
     assign write_data = {decoder_pixel_rgb, 8'h00};
 

@@ -14,6 +14,9 @@ settings.cfg
 .lock.f
 .recent_user_depot.ini
 
+# ModelSim generated library (not HDL source)
+/src/user_source/hdl_source/work/
+
 # ===== Python 缓存 =====
 __pycache__/
 *.pyc

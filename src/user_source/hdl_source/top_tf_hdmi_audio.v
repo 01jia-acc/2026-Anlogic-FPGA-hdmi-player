@@ -162,6 +162,7 @@ wire        sd_card_write_en;         // 【sd_card_bmp 输出→frame_read_writ
 wire [31:0] sd_card_write_data;       // 【sd_card_bmp 输出→frame_read_write】32 bit 像素
 wire        sd_card_write_req;        // 【sd_card_bmp 输出→frame_read_write】开始写一帧
 wire        sd_card_write_req_ack;    // 【frame_read_write 输出→sd_card_bmp】写侧已准备好
+wire        sd_card_write_frame_commit; // 【BMP 解码器→loader】最后一个像素已输出
 wire        frame_write_finish;       // 【frame_read_write 输出→top】整帧写入完成脉冲
 reg         frame_write_toggle_mem;   // 【top 输出→sd_card_bmp】跨域的整帧完成事件
 
@@ -206,6 +207,38 @@ reg  [20:0] reader_vs_pipe;
 reg  [20:0] reader_de_pipe;
 reg  [23:0] reader_rgb_pipe [0:20];
 integer reader_pipe_i;
+
+// 独立写侧：sd_card_clk 域 loader + ext_mem_clk 域写命令 CDC。
+wire        writer_load_start;
+wire        writer_load_busy;
+wire        writer_load_done;
+wire [3:0]  writer_image_complete;
+wire [7:0]  writer_memory_error;
+wire        writer_app_wr_en_src;
+wire [ADDR_BITS-1:0] writer_app_wr_addr_src;
+wire [3:0]  writer_app_wr_mask_src;
+wire [31:0] writer_app_wr_data_src;
+wire        writer_src_full;
+wire        writer_src_overflow;
+wire        writer_dst_app_wr_en;
+wire [ADDR_BITS-1:0] writer_dst_app_wr_addr;
+wire [3:0]  writer_dst_app_wr_mask;
+wire [31:0] writer_dst_app_wr_data;
+wire        writer_dst_idle;
+wire        writer_dst_allow;
+reg         writer_done_toggle_src;
+reg  [1:0]  writer_done_sync_mem;
+reg         writer_done_seen_mem;
+reg         writer_commit_pending_mem;
+reg  [2:0]  writer_commit_wait_mem;
+reg         writer_finish_pulse_mem;
+
+assign writer_load_start = sd_card_write_req && !writer_load_busy;
+assign sd_card_write_req_ack = writer_load_busy;
+assign writer_dst_allow = Sdr_init_done && !Sdr_busy &&
+                          !Sdr_init_ref_vld && !reader_bus_busy;
+assign frame_write_busy = !writer_dst_idle || writer_commit_pending_mem;
+assign frame_write_finish = writer_finish_pulse_mem;
 
 // HDMI 1.4b 视频 AXI-Stream 输入信号。
 // video_rgb_to_axis_640x480 把 RGB + vs/de 转换成这些信号。
@@ -358,6 +391,7 @@ sd_card_bmp_fat32 #(
     .write_req_ack     (sd_card_write_req_ack), // 输入：写侧准备完成应答
     .write_en          (sd_card_write_en),      // 输出→写 FIFO：当前像素有效
     .write_data        (sd_card_write_data),    // 输出→写 FIFO：32 bit 像素数据
+    .write_frame_commit(sd_card_write_frame_commit),
     .SD_nCS            (sd_ncs),                // 输出→TF 卡：SPI 片选
     .SD_DCLK           (sd_dclk),               // 输出→TF 卡：SPI 时钟
     .SD_MOSI           (sd_mosi),               // 输出→TF 卡：SPI 主出从入数据
@@ -550,60 +584,102 @@ assign vout_data = display_valid ? vout_data_raw : 24'd0;
 //       → video_clk/read_en/read_data
 //
 // WRITE_V_FLIP=1 用来修正 BMP 常见的 bottom-up 行顺序。
-frame_read_write #(
-    .WRITE_V_FLIP     (1),   // 参数：写入 SDRAM 时垂直翻转 BMP 行
-    .FRAME_WIDTH      (640), // 参数：一行像素数
-    .FRAME_HEIGHT     (480), // 参数：总行数
-    .ENABLE_READ      (0)    // 参数：旧读侧关闭，由 media_frame_reader 接管
-) frame_read_write_m0(
-    .mem_clk           (ext_mem_clk),        // 输入：FIFO/SDRAM 控制时钟
-    .rst               (rst_all),            // 输入：统一高有效复位
-    .Sdr_init_done     (Sdr_init_done),      // 输入←sdram：初始化完成
-    .Sdr_init_ref_vld  (Sdr_init_ref_vld),   // 输入←sdram：刷新状态
-    .Sdr_busy          (Sdr_busy),           // 输入←sdram：控制器忙
-    .external_read_busy(reader_bus_busy),    // 输入：新 reader 实际占用 SDRAM 时暂停写突发
-
-    // ---------- SDRAM 读应用接口 ----------
-    .App_rd_en         (),                   // 旧读侧关闭
-    .App_rd_addr       (),                   // 旧读侧关闭
-    .Sdr_rd_en         (Sdr_rd_en),          // 输入←sdram：返回数据有效
-    .Sdr_rd_dout       (Sdr_rd_dout),        // 输入←sdram：返回的 32 bit 数据
-
-    // ---------- video_clk 域的读帧接口 ----------
-    .read_clk          (video_clk),          // 输入：HDMI 像素时钟
-    .read_req          (video_read_req),     // 输入：请求读取当前显示帧
-    .read_req_ack      (),                   // 旧读侧关闭
-    .read_finish       (),                   // 输出：整帧读完，本工程未使用
-    .read_addr_0       (BUF0_ADDR),          // 输入：Buffer 0 首地址
-    .read_addr_1       (BUF1_ADDR),          // 输入：Buffer 1 首地址
-    .read_addr_2       (BUF2_ADDR),          // 输入：Buffer 2 首地址
-    .read_addr_3       (BUF3_ADDR),          // 输入：Buffer 3 首地址
-    .read_addr_index   (video_read_buf_idx), // 输入：帧请求边界固定的读缓冲区
-    .read_len          (FRAME_PIXELS),       // 输入：读取 307200 个像素字
-    .read_en           (1'b0),               // 旧读侧关闭
-    .read_data         (),                   // 旧读侧关闭
-
-    // ---------- SDRAM 写应用接口 ----------
-    .App_wr_en         (App_wr_en),          // 输出→sdram：写一个字使能
-    .App_wr_addr       (App_wr_addr),        // 输出→sdram：写地址
-    .App_wr_din        (App_wr_din),         // 输出→sdram：写入数据
-    .App_wr_dm         (App_wr_dm),          // 输出→sdram：字节写屏蔽
-
-    // ---------- sd_card_clk 域的写帧接口 ----------
-    .write_clk         (sd_card_clk),        // 输入：SD/BMP 像素时钟
-    .write_req         (sd_card_write_req),  // 输入：请求准备写一帧
-    .write_req_ack     (sd_card_write_req_ack), // 输出：写侧准备完成
-    .write_finish      (frame_write_finish), // 输出→top：整帧写完脉冲
-    .write_addr_0      (BUF0_ADDR),          // 输入：Buffer 0 首地址
-    .write_addr_1      (BUF1_ADDR),          // 输入：Buffer 1 首地址
-    .write_addr_2      (BUF2_ADDR),          // 输入：Buffer 2 首地址
-    .write_addr_3      (BUF3_ADDR),          // 输入：Buffer 3 首地址
-    .write_addr_index  (write_buf_idx),      // 输入：选择当前写入缓冲区
-    .write_len         (FRAME_PIXELS),       // 输入：写入 307200 个像素字
-    .write_en          (sd_card_write_en),   // 输入：SD 侧当前像素有效
-    .write_data        (sd_card_write_data), // 输入：SD 侧送来的 32 bit 像素
-    .write_busy        (frame_write_busy)    // 输出：写侧占用 SDRAM
+// ============================================================================
+// 独立写侧：loader（sd_card_clk）+ 命令 CDC（ext_mem_clk）
+// ============================================================================
+// loader 只接收 FAT/BMP 产生的 RGB 流，并按固定 bank 地址生成写命令。
+// media_sdram_write_cdc 把 {地址、掩码、数据} 作为一个整体跨到 SDRAM 域，
+// 避免直接跨时钟采样三组彼此可能错位的总线。
+media_frame_loader #(
+    .ADDR_WIDTH   (ADDR_BITS),
+    .IMAGE_WORDS  (FRAME_PIXELS),
+    .FIFO_DEPTH   (512),
+    .BURST_SIZE   (128),
+    .STALL_TIMEOUT(32'd5_000_000)
+) u_frame_loader (
+    .clk                  (sd_card_clk),
+    .rst_n                (~rst_all),
+    .load_start           (writer_load_start),
+    .image_index          (write_buf_idx),
+    .pixel_valid          (sd_card_write_en),
+    .pixel_rgb            (sd_card_write_data[31:8]),
+    .frame_commit         (sd_card_write_frame_commit),
+    .decode_error         (8'd0),
+    .command_ready        (!writer_src_full),
+    .load_busy            (writer_load_busy),
+    .load_done            (writer_load_done),
+    .image_complete       (writer_image_complete),
+    .memory_error         (writer_memory_error),
+    .controller_init_done (Sdr_init_done),
+    .controller_busy      (Sdr_busy),
+    .refresh_active       (Sdr_init_ref_vld),
+    .app_wr_en            (writer_app_wr_en_src),
+    .app_wr_addr          (writer_app_wr_addr_src),
+    .app_wr_mask          (writer_app_wr_mask_src),
+    .app_wr_data          (writer_app_wr_data_src)
 );
+
+media_sdram_write_cdc #(
+    .ADDR_WIDTH      (ADDR_BITS),
+    .FIFO_ADDR_WIDTH (9),
+    .BURST_SIZE      (128)
+) u_frame_write_cdc (
+    .src_clk         (sd_card_clk),
+    .src_rst_n       (~rst_all),
+    .src_wr_en       (writer_app_wr_en_src),
+    .src_wr_addr     (writer_app_wr_addr_src),
+    .src_wr_mask     (writer_app_wr_mask_src),
+    .src_wr_data     (writer_app_wr_data_src),
+    .src_full        (writer_src_full),
+    .src_overflow    (writer_src_overflow),
+    .dst_clk         (ext_mem_clk),
+    .dst_rst_n       (~rst_all),
+    .dst_allow       (writer_dst_allow),
+    .dst_app_wr_en   (writer_dst_app_wr_en),
+    .dst_app_wr_addr (writer_dst_app_wr_addr),
+    .dst_app_wr_mask (writer_dst_app_wr_mask),
+    .dst_app_wr_data (writer_dst_app_wr_data),
+    .dst_idle        (writer_dst_idle)
+);
+
+assign App_wr_en   = writer_dst_app_wr_en;
+assign App_wr_addr = writer_dst_app_wr_addr;
+assign App_wr_dm   = writer_dst_app_wr_mask;
+assign App_wr_din  = writer_dst_app_wr_data;
+
+// loader 完成只代表写命令已全部产生；再等待 CDC FIFO 真正排空，
+// 才把“整帧写完”事件通知 FAT32 控制器。
+always @(posedge sd_card_clk or posedge rst_all) begin
+    if (rst_all)
+        writer_done_toggle_src <= 1'b0;
+    else if (writer_load_done)
+        writer_done_toggle_src <= ~writer_done_toggle_src;
+end
+
+always @(posedge ext_mem_clk or posedge rst_all) begin
+    if (rst_all) begin
+        writer_done_sync_mem <= 2'b00;
+        writer_done_seen_mem <= 1'b0;
+        writer_commit_pending_mem <= 1'b0;
+        writer_commit_wait_mem <= 3'd0;
+        writer_finish_pulse_mem <= 1'b0;
+    end else begin
+        writer_done_sync_mem <= {writer_done_sync_mem[0], writer_done_toggle_src};
+        writer_finish_pulse_mem <= 1'b0;
+        if (writer_done_sync_mem[1] != writer_done_seen_mem) begin
+            writer_done_seen_mem <= writer_done_sync_mem[1];
+            writer_commit_pending_mem <= 1'b1;
+            writer_commit_wait_mem <= 3'd4;
+        end else if (writer_commit_pending_mem) begin
+            if (writer_commit_wait_mem != 0)
+                writer_commit_wait_mem <= writer_commit_wait_mem - 1'b1;
+            else if (writer_dst_idle) begin
+                writer_commit_pending_mem <= 1'b0;
+                writer_finish_pulse_mem <= 1'b1;
+            end
+        end
+    end
+end
 
 // ============================================================================
 // 外部 SDRAM 控制器

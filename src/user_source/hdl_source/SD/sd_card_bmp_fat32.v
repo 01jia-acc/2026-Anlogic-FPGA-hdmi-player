@@ -93,6 +93,7 @@ module sd_card_bmp_fat32 #(
     input  wire        write_req_ack,  // "写 FIFO 已清空、地址/长度已锁存，开始灌"
     output wire        write_en,       // =1 时 write_data 是一个有效像素
     output wire [31:0] write_data,     // {R,G,B,8'd0}，32 位对齐的像素字
+    output wire        write_frame_commit, // 最后一个 BMP 像素已输出
 
     // ===================== 端口：SD 卡 SPI 引脚（直通 u_image_source） =====================
     output wire        SD_nCS,         // SPI 片选（低有效）
@@ -325,6 +326,7 @@ module sd_card_bmp_fat32 #(
         // ---- 写帧握手/像素流（直通 frame_read_write）----
         .write_req(write_req), .write_req_ack(write_req_ack),
         .write_en(write_en), .write_data(write_data),
+        .frame_commit(write_frame_commit),
         // ---- SD 卡物理引脚 ----
         .sd_init_done(sd_init_done),
         .SD_nCS(SD_nCS), .SD_DCLK(SD_DCLK), .SD_MOSI(SD_MOSI), .SD_MISO(SD_MISO),
