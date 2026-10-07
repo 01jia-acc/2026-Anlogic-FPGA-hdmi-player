@@ -129,6 +129,7 @@ wire [6:0]  seg_data_0;    // 【seg_decoder 输出→seg_scan】低有效/编�
 
 // USB-UART 调试状态：由 SD/FAT32 控制器提供，供 50 MHz 日志时钟域采样。
 wire        debug_sd_init_done;
+wire osd_auto_sd;                 // SD域模式，经快照邮箱送到像素域
 wire        debug_scan_busy;
 wire        debug_scan_done;
 wire [7:0]  debug_scan_error;
@@ -226,12 +227,13 @@ wire [3:0]  writer_dst_app_wr_mask;
 wire [31:0] writer_dst_app_wr_data;
 wire        writer_dst_idle;
 wire        writer_dst_allow;
-reg         writer_done_toggle_src;
-reg  [1:0]  writer_done_sync_mem;
-reg         writer_done_seen_mem;
-reg         writer_commit_pending_mem;
-reg  [2:0]  writer_commit_wait_mem;
-reg         writer_finish_pulse_mem;
+// —— "整帧写完"两级确认事件链的寄存器（工作过程详见 652-682 行注释）——
+reg         writer_done_toggle_src;    // 【sd_card_clk 域】loader 每次报"命令全部产生"就翻转一次
+reg  [1:0]  writer_done_sync_mem;      // 【ext_mem_clk 域】toggle 的两级同步移位寄存器
+reg         writer_done_seen_mem;      // 【ext_mem_clk 域】上次看到的 toggle 值（用于检测"又翻转了"）
+reg         writer_commit_pending_mem; // 【ext_mem_clk 域】=1：已收到"命令全部产生"，正在等 CDC 排空
+reg  [2:0]  writer_commit_wait_mem;    // 【ext_mem_clk 域】等待倒计时（4 拍，给 dst_idle 稳定时间）
+reg         writer_finish_pulse_mem;   // 【ext_mem_clk 域】最终"整帧真正写完"的单拍脉冲
 
 assign writer_load_start = sd_card_write_req && !writer_load_busy;
 assign sd_card_write_req_ack = writer_load_busy;
@@ -397,6 +399,7 @@ sd_card_bmp_fat32 #(
     .SD_MOSI           (sd_mosi),               // 输出→TF 卡：SPI 主出从入数据
     .SD_MISO           (sd_miso),               // 输入←TF 卡：SPI 主入从出数据
     .debug_sd_init_done(debug_sd_init_done),
+    .debug_auto_enabled(osd_auto_sd),
     .debug_scan_busy   (debug_scan_busy),
     .debug_scan_done   (debug_scan_done),
     .debug_scan_error  (debug_scan_error),
@@ -569,6 +572,40 @@ assign vout_data_raw = reader_rgb_pipe[20];
 // 防止 HDMI 在帧缓存尚未准备好时显示随机数据。
 assign vout_data = display_valid ? vout_data_raw : 24'd0;
 
+// OSD只替换最终像素颜色，不改SDRAM/FIFO协议。
+wire osd_sd_ready, osd_mem_ready; // 两个源时钟域各自的邮箱空闲反馈
+wire [95:0] osd_sd_snapshot;      // [8]=模式，[7:0]=SD/写侧错误
+wire [95:0] osd_mem_snapshot;     // [7:0]=读侧错误
+wire [23:0] osd_rgb;             // 叠字后的完整RGB888
+wire osd_de;                     // DE透传，与输出颜色同拍
+// 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
+wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
+                         (debug_load_error != 0) ? debug_load_error : debug_scan_error;
+wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
+                       osd_mem_snapshot[7:0] : osd_sd_snapshot[7:0];
+// 邮箱复用于低速状态：空闲即发送最新快照，中间变化允许合并。
+// 此处frame_start接消隐安全窗口；字形核心仍只在VS下降沿更新显示状态。
+subtitle_frame_commit u_osd_sd_commit (
+    .src_clk(sd_card_clk), .src_rst_n(~rst_all),
+    .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
+    .src_text({87'd0,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
+    .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
+);
+subtitle_frame_commit u_osd_mem_commit (
+    .src_clk(ext_mem_clk), .src_rst_n(~rst_all),
+    .src_commit(osd_mem_ready), .src_ready(osd_mem_ready),
+    .src_text({88'd0,reader_error}), .src_length(6'd0), .src_enable(1'b1),
+    .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
+    .dst_text(osd_mem_snapshot), .dst_length(), .dst_enable()
+);
+osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
+    .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(vout_data),
+    .active_index(video_disp_buf_idx), .auto_enabled(osd_sd_snapshot[8]),
+    .error_code(osd_error), .rgb_out(osd_rgb), .de_out(osd_de),
+    .osd_active(), .frame_start()
+);
+
 // ============================================================================
 // 帧缓存总控：两个异步 FIFO + SDRAM 读写突发控制
 // ============================================================================
@@ -647,36 +684,66 @@ assign App_wr_addr = writer_dst_app_wr_addr;
 assign App_wr_dm   = writer_dst_app_wr_mask;
 assign App_wr_din  = writer_dst_app_wr_data;
 
-// loader 完成只代表写命令已全部产生；再等待 CDC FIFO 真正排空，
-// 才把“整帧写完”事件通知 FAT32 控制器。
+// ============================================================================
+// "整帧写完"的两级确认：先等命令全部产生，再等 CDC FIFO 真正排空
+// ============================================================================
+// 为什么需要两级？loader 的 load_done（writer_load_done）只说明"写命令
+// 已全部产生并送进了 CDC FIFO"；这些命令可能还堵在 FIFO 里没吐给 SDRAM。
+// 必须等 writer_dst_idle = 1（CDC FIFO 排空、无突发在途）才算"数据真的
+// 全部写进了 SDRAM"，此时才能把"整帧写完"事件通知 FAT32 控制器。
+//
+// 两个 always 块的分工：
+//   第一个（sd_card_clk 域）：把 load_done 脉冲变成 toggle 电平翻转。
+//     为什么不直接跨域传脉冲？短脉冲跨时钟域可能被对面漏采；toggle
+//     翻转一次代表一次事件，对面只要比较"和上次看到的值一不一样"
+//     就能捕捉到，永远不漏（这是跨域传事件的通用手法）。
+//   第二个（ext_mem_clk 域）：同步 toggle → 检测翻转 → 等 4 拍 →
+//     等 writer_dst_idle → 输出 writer_finish_pulse_mem 单拍脉冲。
+// ============================================================================
+
+// —— 第一级：loader 报"命令全部产生" → 翻转 toggle ——
 always @(posedge sd_card_clk or posedge rst_all) begin
     if (rst_all)
-        writer_done_toggle_src <= 1'b0;
-    else if (writer_load_done)
-        writer_done_toggle_src <= ~writer_done_toggle_src;
+        writer_done_toggle_src <= 1'b0;                      // 复位：toggle 归零
+    else if (writer_load_done)                               // loader：本帧命令已全部产生
+        writer_done_toggle_src <= ~writer_done_toggle_src;   // 翻转一次 = 发生一次事件
 end
 
+// —— 第二级：等 CDC 排空，产出最终"整帧写完"脉冲 ——
 always @(posedge ext_mem_clk or posedge rst_all) begin
     if (rst_all) begin
-        writer_done_sync_mem <= 2'b00;
-        writer_done_seen_mem <= 1'b0;
-        writer_commit_pending_mem <= 1'b0;
-        writer_commit_wait_mem <= 3'd0;
-        writer_finish_pulse_mem <= 1'b0;
+        writer_done_sync_mem <= 2'b00;      // 同步链清零
+        writer_done_seen_mem <= 1'b0;       // 清零"上次看到的值"
+        writer_commit_pending_mem <= 1'b0;  // 无待确认事件
+        writer_commit_wait_mem <= 3'd0;     // 倒计时清零
+        writer_finish_pulse_mem <= 1'b0;    // 无完成脉冲
     end else begin
+        // 同步链：把 sd_card_clk 域的 toggle 打两拍采进来（消除亚稳态）。
+        // [0] 位直接采 toggle，[1] 位接收 [0] 的旧值——判断用 [1]，
+        // 因为它在判断当拍已经稳定了一拍，时序更收敛。
         writer_done_sync_mem <= {writer_done_sync_mem[0], writer_done_toggle_src};
+        // 完成脉冲默认拉低：只在确认瞬间拉高 1 拍
         writer_finish_pulse_mem <= 1'b0;
         if (writer_done_sync_mem[1] != writer_done_seen_mem) begin
-            writer_done_seen_mem <= writer_done_sync_mem[1];
-            writer_commit_pending_mem <= 1'b1;
-            writer_commit_wait_mem <= 3'd4;
+            // —— 检测到 toggle 翻转：发生了一次新的"命令全部产生"事件 ——
+            writer_done_seen_mem <= writer_done_sync_mem[1]; // 更新"上次看到的值"，为下次检测做准备
+            writer_commit_pending_mem <= 1'b1;    // 挂起确认：开始等 CDC 排空
+            writer_commit_wait_mem <= 3'd4;       // 先倒计时 4 拍：给 writer_dst_idle 稳定时间
+                                                  //（dst_idle 由空标志等组合逻辑拼出，
+                                                  //  等几拍吸收延迟是安全习惯）
         end else if (writer_commit_pending_mem) begin
+            // —— 有事件待确认：先走完倒计时，再每拍等排空 ——
             if (writer_commit_wait_mem != 0)
-                writer_commit_wait_mem <= writer_commit_wait_mem - 1'b1;
+                writer_commit_wait_mem <= writer_commit_wait_mem - 1'b1; // 倒计时 4→0
             else if (writer_dst_idle) begin
-                writer_commit_pending_mem <= 1'b0;
-                writer_finish_pulse_mem <= 1'b1;
+                // —— CDC FIFO 已排空且无突发在途：数据真正全部写进 SDRAM ——
+                writer_commit_pending_mem <= 1'b0; // 确认完成，撤销挂起
+                writer_finish_pulse_mem <= 1'b1;   // 输出"整帧写完"单拍脉冲
+                                                   // → 经 241 行成为 frame_write_finish
+                                                   // → 355-359 行再转成 toggle 通知 FAT32 控制器
             end
+            // 注：倒计时结束但 dst_idle 还没来，本分支什么都不做，
+            //     pending 保持 1，下一拍继续等（每拍重复检查）。
         end
     end
 end
@@ -711,8 +778,8 @@ video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_clk         (video_clk),       // 输入：视频像素时钟
     .I_rst         (rst_all),         // 输入：统一高有效复位
     .I_vs          (vs),              // 输入：延迟后的场同步
-    .I_de          (de),              // 输入：延迟后的有效显示区
-    .I_rgb         (vout_data),       // 输入：最终 RGB888
+    .I_de          (osd_de),          // OSD不增加流水拍数
+    .I_rgb         (osd_rgb),         // 叠字后的最终RGB888
     .O_video_user  (axis_s_user),     // 输出→HDMI IP：帧起始/用户标志
     .O_video_valid (axis_s_valid),    // 输出→HDMI IP：AXIS 数据有效
     .O_video_last  (axis_s_last),     // 输出→HDMI IP：数据包/行结束标志

@@ -103,6 +103,7 @@ module sd_card_bmp_fat32 #(
 
     // ===================== 端口：USB-UART 调试观察线 =====================
     // 都是当前控制器状态的只读镜像，供 50MHz 日志时钟域采样，不参与控制。
+    output wire        debug_auto_enabled, // 模式只读输出，供OSD安全跨域使用
     output wire        debug_sd_init_done,
     output wire        debug_scan_busy,
     output wire        debug_scan_done,
@@ -181,6 +182,7 @@ module sd_card_bmp_fat32 #(
     reg [2:0] preload_next_idx; // 下一张待预加载图片；4 表示四张均已尝试
     reg preload_halted; // 源文件/写帧失败后暂停，避免复用尚未结束的写通道
     reg auto_play_en;        // 电平：自动轮播开关
+    assign debug_auto_enabled = auto_play_en;
     // 轮播定时器（以 clk 周期计数；计满 1 秒产生 auto_tick 后清零）。
     reg [31:0] auto_cnt;
 
