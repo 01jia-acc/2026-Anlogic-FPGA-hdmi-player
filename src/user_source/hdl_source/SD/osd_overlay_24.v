@@ -13,13 +13,16 @@ module osd_overlay_24 #(
     input wire [7:0] error_code,      // 已安全跨域的完整错误快照
     output wire [23:0] rgb_out,       // 完整保留非文字像素的24位精度
     output wire de_out,osd_active,    // 有效标签与笔画命中标志
-    output wire frame_start           // VS下降沿事件，供状态快照提交使用
+    output wire frame_start,          // VS下降沿事件，供状态快照提交使用
+    output wire [11:0] pixel_x_out, pixel_y_out // 同拍坐标供时间戳共享
 );
     reg [11:0] pixel_x;               // 当前输入有效像素的列；行消隐时准备为0
     reg [11:0] line_y;                // 当前有效行；只在DE下降沿加1，不数消隐行
     reg de_q;                         // 上一拍DE，用于识别有效行结束
     reg vs_q;                         // 上一拍VS，用于识别场同步开始
     assign frame_start=vs_q && !vsync;
+    assign pixel_x_out=pixel_x;
+    assign pixel_y_out=line_y;
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin pixel_x<=0; line_y<=0; de_q<=0; vs_q<=1; end
         else begin

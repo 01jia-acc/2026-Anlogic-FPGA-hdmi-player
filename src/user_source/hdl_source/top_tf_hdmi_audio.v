@@ -578,6 +578,9 @@ wire [95:0] osd_sd_snapshot;      // [8]=模式，[7:0]=SD/写侧错误
 wire [95:0] osd_mem_snapshot;     // [7:0]=读侧错误
 wire [23:0] osd_rgb;             // 叠字后的完整RGB888
 wire osd_de;                     // DE透传，与输出颜色同拍
+wire osd_frame_start;
+wire [11:0] osd_x, osd_y;
+wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
                          (debug_load_error != 0) ? debug_load_error : debug_scan_error;
@@ -603,7 +606,13 @@ osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(vout_data),
     .active_index(video_disp_buf_idx), .auto_enabled(osd_sd_snapshot[8]),
     .error_code(osd_error), .rgb_out(osd_rgb), .de_out(osd_de),
-    .osd_active(), .frame_start()
+    .osd_active(), .frame_start(osd_frame_start),
+    .pixel_x_out(osd_x), .pixel_y_out(osd_y)
+);
+timestamp_osd #(.CLOCK_FREQ_HZ(25_000_000)) u_timestamp_osd (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .rgb_in(osd_rgb), .rgb_out(timestamp_rgb)
 );
 
 // ============================================================================
@@ -779,7 +788,7 @@ video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_rst         (rst_all),         // 输入：统一高有效复位
     .I_vs          (vs),              // 输入：延迟后的场同步
     .I_de          (osd_de),          // OSD不增加流水拍数
-    .I_rgb         (osd_rgb),         // 叠字后的最终RGB888
+    .I_rgb         (timestamp_rgb),   // 状态条与运行时长叠加后的RGB888
     .O_video_user  (axis_s_user),     // 输出→HDMI IP：帧起始/用户标志
     .O_video_valid (axis_s_valid),    // 输出→HDMI IP：AXIS 数据有效
     .O_video_last  (axis_s_last),     // 输出→HDMI IP：数据包/行结束标志

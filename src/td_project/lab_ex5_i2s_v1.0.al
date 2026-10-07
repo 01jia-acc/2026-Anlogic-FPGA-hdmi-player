@@ -325,7 +325,7 @@
                     <Attr Name="CompileOrder" Val="44"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/fifo_prefetch_2.v">
+            <File Path="../user_source/hdl_source/SD/timestamp_osd.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -333,7 +333,7 @@
                     <Attr Name="CompileOrder" Val="45"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/media_frame_reader.v">
+            <File Path="../user_source/hdl_source/SD/fifo_prefetch_2.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -341,7 +341,7 @@
                     <Attr Name="CompileOrder" Val="46"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/media_sdram_write_cdc.v">
+            <File Path="../user_source/hdl_source/SD/media_frame_loader.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -349,7 +349,7 @@
                     <Attr Name="CompileOrder" Val="47"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/media_frame_loader.v">
+            <File Path="../user_source/hdl_source/SD/media_frame_reader.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -357,7 +357,7 @@
                     <Attr Name="CompileOrder" Val="48"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/osd_overlay_24.v">
+            <File Path="../user_source/hdl_source/SD/media_sdram_write_cdc.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -365,7 +365,7 @@
                     <Attr Name="CompileOrder" Val="49"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/status_osd_overlay.v">
+            <File Path="../user_source/hdl_source/SD/osd_overlay_24.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
@@ -373,12 +373,20 @@
                     <Attr Name="CompileOrder" Val="50"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/SD/subtitle_frame_commit.v">
+            <File Path="../user_source/hdl_source/SD/status_osd_overlay.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="51"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/SD/subtitle_frame_commit.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="52"/>
                 </FileInfo>
             </File>
         </Verilog>
