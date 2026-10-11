@@ -78,8 +78,9 @@ def sync_new_images(source_dir, target_drive, max_count=4):
     for i, bmp_file in enumerate(files_to_copy):
         try:
             filename = os.path.basename(bmp_file)
-            # 为了让 FPGA 物理扇区尽量连续，我们在文件名前加上序号
-            target_name = f"{i:02d}_{filename}"
+            # FAT32 版本通过根目录 8.3 短文件名定位图片，统一写成
+            # PIC1.BMP~PIC4.BMP；不要使用原来物理扫描版的 00_xxx.bmp。
+            target_name = f"PIC{i + 1}.BMP"
             target_path = os.path.join(target_drive, target_name)
             
             shutil.copy2(bmp_file, target_path)

@@ -15,6 +15,9 @@ settings.cfg
 .recent_user_depot.ini
 tests/build/
 
+# ModelSim generated library (not HDL source)
+/src/user_source/hdl_source/work/
+
 # ===== Python 缓存 =====
 __pycache__/
 *.pyc
