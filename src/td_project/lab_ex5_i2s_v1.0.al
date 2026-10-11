@@ -392,7 +392,7 @@
             <File Path="../user_source/hdl_source/audio/pcm_test_tone.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="53"/>
                 </FileInfo>
@@ -400,7 +400,7 @@
             <File Path="../user_source/hdl_source/audio/pcm_media_tone.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="54"/>
                 </FileInfo>
@@ -408,7 +408,7 @@
             <File Path="../user_source/hdl_source/audio/media_hdmi_audio_bridge.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="55"/>
                 </FileInfo>
@@ -416,7 +416,7 @@
             <File Path="../user_source/hdl_source/SD/media_display_commit.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="56"/>
                 </FileInfo>
