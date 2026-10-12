@@ -1,13 +1,13 @@
 # Run with td_commands_prompt.exe tests/build_audio_bitstream.tcl.
-# Keep this release separate from the project's old GUI Runs bitstreams.
+# Keep reports in the release directory and synchronize GUI download bitstreams.
 set repo_root [file normalize [file join [file dirname [info script]] ..]]
-set build_dir [file join $repo_root tests build four_buffer_audio_release]
+set build_dir [file join $repo_root tests build pcm_audio_release]
 file mkdir $build_dir
 set project_path [file join $repo_root src td_project lab_ex5_i2s_v1.0.al]
 set project_handle [open $project_path r]
 set project_text [read $project_handle]
 close $project_handle
-foreach source {audio/pcm_test_tone.v audio/pcm_media_tone.v audio/media_hdmi_audio_bridge.v SD/media_display_commit.v SD/sd_card_bmp_fat32.v SD/media_frame_loader.v SD/media_frame_reader.v SD/media_sdram_write_cdc.v} {
+foreach source {audio/pcm_stream_buffer.v audio/pcm_test_tone.v audio/pcm_media_tone.v audio/media_hdmi_audio_bridge.v SD/media_display_commit.v SD/sd_card_bmp_fat32.v SD/media_frame_loader.v SD/media_frame_reader.v SD/media_sdram_write_cdc.v} {
     if {[string first "$source" $project_text] < 0} {
         error "Missing integration source in project: $source. Reload the updated .al in TD."
     }
@@ -42,5 +42,6 @@ report_timing_summary -file hdmi_four_buffer_audio_pr.timing
 report_timing_exception -file hdmi_four_buffer_audio_exception.timing
 export_db hdmi_four_buffer_audio_pr.db
 bitgen -bit hdmi_four_buffer_audio.bit
+source [file join $repo_root tests sync_audio_bitstream.tcl]
 puts "PASS: built $build_dir/hdmi_four_buffer_audio.bit; review final timing before hardware testing"
 exit

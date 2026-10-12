@@ -37,11 +37,25 @@ module sd_fat32_image_source #(
     parameter integer SPI_LOW_SPEED_DIV  = 248,
     parameter integer SPI_HIGH_SPEED_DIV = 4,
     // 流式读文件时最多允许访问的簇数（防坏簇链死循环的保护上限）。
-    parameter integer MAX_VISITED_CLUSTERS = 8192
+    parameter integer MAX_VISITED_CLUSTERS = 8388608,
+    parameter integer PCM_ENABLE = 0,
+    parameter integer PCM_FIFO_ADDR_WIDTH = 12,
+    parameter integer PCM_SECTOR_TIMEOUT = 100_000_000
 ) (
     // 整条 FAT/SD/解码链使用同一 clk；rst 高有效。
     input  wire        clk,            // 系统时钟（100MHz，来自顶层）
     input  wire        rst,            // 高有效复位
+
+    // 图片预加载结束后，文件流通道交给 AUDIO.PCM，直到复位不再读图片。
+    input wire pcm_play_enable,
+    input wire pixel_clk,
+    input wire pcm_ready,
+    output wire signed [15:0] pcm_sample,
+    output wire pcm_valid,
+    output wire pcm_active,
+    output wire pcm_end,
+    output wire pcm_underflow,
+    output reg [7:0] pcm_error,
 
     // ===================== 端口：FAT 卷扫描事务接口 =====================
     input  wire        scan_start,     // 事件：上层发"开始扫描"单拍脉冲
@@ -179,6 +193,12 @@ module sd_fat32_image_source #(
     wire [31:0] data_start_lba;     // 数据区第一个扇区的 LBA（簇 2 从这里开始）
     wire [7:0] sectors_per_cluster; // 每簇扇区数（2 的幂）
     wire [31:0] max_cluster;        // 卷上最大合法簇号（防坏链越界）
+    wire audio_resource_valid;
+    wire [31:0] audio_cluster, audio_size;
+    wire pcm_sector_ready, pcm_overflow;
+    reg audio_attempted, audio_start, audio_done, audio_abort;
+    reg scan_usable;
+    reg [31:0] audio_wait_count;
     // ---- decoder 的输出 ----
     wire decoder_header_accepted;   // BMP 头解析通过
     wire decoder_pixel_valid;       // 本拍 pixel_rgb 有效（接 write_en）
@@ -203,6 +223,7 @@ module sd_fat32_image_source #(
     localparam SOURCE_IDLE   = 2'd0;  // 空闲：可接受新加载事务
     localparam SOURCE_ACK    = 2'd1;  // 已发 write_req，等帧写端 ack
     localparam SOURCE_STREAM = 2'd2;  // 正在流文件字节 + 输出像素
+    localparam SOURCE_AUDIO = 2'd3;   // 复用文件流读取 PCM，不送 BMP 解码器
 
     // ========================================================================
     // 组合观察线：对上层暴露的状态和数据通路（全部 assign 连续驱动，无记忆）
@@ -210,9 +231,10 @@ module sd_fat32_image_source #(
     assign scan_busy = scanner_scan_busy;                     // 直通 scanner 状态
     // source_ready = "可以接新事务"：本外壳空闲 + 扫描器不在扫（扇区通道空）。
     // 上层发 scan_start/load_start 都以它为许可条件。
-    assign source_ready = (source_state == SOURCE_IDLE) && !scanner_scan_busy;
+    assign source_ready = (source_state == SOURCE_IDLE) && !scanner_scan_busy &&
+                          !streamer_file_busy && !sector_busy && !audio_attempted;
     // load_busy = 外壳不在空闲 = 加载事务（含等 ack 阶段）正在进行。
-    assign load_busy = (source_state != SOURCE_IDLE);
+    assign load_busy = (source_state == SOURCE_ACK || source_state == SOURCE_STREAM);
     // write_req 只在 SOURCE_ACK 阶段为 1：事务开始读文件前先请求写端准备。
     assign write_req = (source_state == SOURCE_ACK);
     // 只有流传输阶段 + 解码器输出有效像素时，write_data 才有效。
@@ -251,7 +273,9 @@ module sd_fat32_image_source #(
     assign scanner_sector_byte_index = sector_byte_index;
     assign scanner_sector_done = sector_done;
     assign scanner_sector_error = sector_error;
-    assign streamer_sector_busy = sector_busy;
+    // 请求之前预留整个扇区的缓冲；一旦发出请求就必须接收全部字节。
+    assign streamer_sector_busy = sector_busy ||
+        (source_state == SOURCE_AUDIO && !pcm_sector_ready);
     assign streamer_sector_valid = sector_valid;
     assign streamer_sector_byte = sector_byte;
     assign streamer_sector_byte_index = sector_byte_index;
@@ -355,6 +379,9 @@ module sd_fat32_image_source #(
         .resource1_size       (resource1_size),
         .resource2_size       (resource2_size),
         .resource3_size       (resource3_size),
+        .audio_resource_valid (audio_resource_valid),
+        .audio_cluster        (audio_cluster),
+        .audio_size           (audio_size),
         .debug_state          (scanner_debug_state),
         .debug_sector_done_count(scanner_debug_sector_done_count),
         .debug_resource_valid (scanner_debug_resource_valid),
@@ -381,7 +408,7 @@ module sd_fat32_image_source #(
         .rst_n                (~rst),
         // 文件事务控制：start 是外壳发的一拍脉冲，abort 直通上层的 load_abort
         .file_start           (streamer_start),
-        .file_abort           (load_abort),
+        .file_abort           (load_abort || audio_abort),
         // 文件定位参数：来自外壳锁存的冻结副本（load_cluster_q/load_size_q）
         .first_cluster        (load_cluster_q),
         .file_size            (load_size_q),
@@ -424,10 +451,10 @@ module sd_fat32_image_source #(
         .file_abort           (load_abort),
         .file_size            (load_size_q),
         // 文件字节流输入（直接来自 streamer）
-        .file_valid           (streamer_file_valid),
+        .file_valid           (streamer_file_valid && source_state == SOURCE_STREAM),
         .file_byte            (streamer_file_byte),
         .file_byte_offset     (streamer_file_byte_offset),
-        .file_end             (streamer_file_done),  // 字节流结束通知
+        .file_end             (streamer_file_done && source_state == SOURCE_STREAM),
         .upstream_error       (streamer_fs_error),   // 上游 FS 错误透传
         // 输出（pixel_valid/pixel_rgb 接 write_en/write_data）
         .header_accepted      (decoder_header_accepted),
@@ -449,6 +476,17 @@ module sd_fat32_image_source #(
     // 它不解析 FAT 字段，只协调三个子模块的启动顺序：
     //   先确认写端（SOURCE_ACK 等 write_req_ack），再同时启动文件流和 BMP
     //   解码（进 SOURCE_STREAM），最后等 decoder_done 收尾。
+    pcm_stream_buffer #(.ADDR_WIDTH(PCM_FIFO_ADDR_WIDTH)) u_pcm_buffer (
+        .wr_clk(clk), .rd_clk(pixel_clk), .rst(rst),
+        .stream_start(audio_start), .stream_done(audio_done),
+        .prefill_done(streamer_file_done && source_state == SOURCE_AUDIO),
+        .byte_valid(streamer_file_valid && source_state == SOURCE_AUDIO),
+        .byte_data(streamer_file_byte), .sector_ready(pcm_sector_ready),
+        .overflow(pcm_overflow), .sample(pcm_sample), .sample_valid(pcm_valid),
+        .sample_ready(pcm_ready), .stream_active(pcm_active),
+        .stream_end(pcm_end), .underflow(pcm_underflow), .sample_counter()
+    );
+
     always @(posedge clk or posedge rst) begin
         // ------------------------------------------------------------------
         // (a) 复位：回空闲、参数清零、无脉冲
@@ -462,6 +500,9 @@ module sd_fat32_image_source #(
             decoder_start <= 1'b0;
             load_done <= 1'b0;
             load_error <= 8'h00;
+            audio_attempted <= 0;
+            audio_start <= 0; audio_done <= 0; audio_abort <= 0;
+            audio_wait_count <= 0; pcm_error <= 0; scan_usable <= 0;
         end else begin
             // ------------------------------------------------------------------
             // 每拍开头：脉冲类输出默认清零（条件满足才置 1，最多维持一拍）
@@ -469,6 +510,11 @@ module sd_fat32_image_source #(
             streamer_start <= 1'b0;
             decoder_start <= 1'b0;
             load_done <= 1'b0;
+            audio_start <= 0; audio_done <= 0; audio_abort <= 0;
+            if (scan_done) scan_usable <= scan_error == 0 || scan_error == 8'h22;
+            if (source_state == SOURCE_AUDIO && sector_busy && !sector_done)
+                audio_wait_count <= audio_wait_count + 1'b1;
+            else audio_wait_count <= 0;
 
             // ------------------------------------------------------------------
             // (b) 中止处理：优先于一切状态，直接回空闲
@@ -494,6 +540,18 @@ module sd_fat32_image_source #(
                             load_size_q <= load_size;
                             load_error <= 8'h00;
                             source_state <= SOURCE_ACK;
+                        end else if (PCM_ENABLE && pcm_play_enable && scan_usable && source_ready) begin
+                            audio_attempted <= 1;
+                            if (audio_resource_valid) begin
+                                if (audio_size == 0 || audio_size[0]) pcm_error <= 8'h71;
+                                else begin
+                                    load_cluster_q <= audio_cluster;
+                                    load_size_q <= audio_size;
+                                    streamer_start <= 1;
+                                    audio_start <= 1;
+                                    source_state <= SOURCE_AUDIO;
+                                end
+                            end
                         end
                     end
 
@@ -531,6 +589,23 @@ module sd_fat32_image_source #(
                             else
                                 load_error <= 8'h00;
                             source_state <= SOURCE_IDLE;
+                        end
+                    end
+
+                    SOURCE_AUDIO: begin
+                        if (pcm_overflow || audio_wait_count >= PCM_SECTOR_TIMEOUT ||
+                            (streamer_file_done && streamer_fs_error != 0)) begin
+                            audio_done <= 1;
+                            source_state <= SOURCE_IDLE;
+                            if (pcm_overflow) pcm_error <= 8'h72;
+                            else if (audio_wait_count >= PCM_SECTOR_TIMEOUT) pcm_error <= 8'h73;
+                            else pcm_error <= streamer_fs_error;
+                            if (!streamer_file_done) audio_abort <= 1;
+                        end else if (streamer_file_done) begin
+                            // 正常 EOF：从锁存的首簇/大小重读 AUDIO.PCM。
+                            // 不结束或复位 PCM FIFO，下一轮紧接上一轮样本；
+                            // 扇区水位反压仍生效，切到琶音后暂停消耗样本。
+                            streamer_start <= 1;
                         end
                     end
 

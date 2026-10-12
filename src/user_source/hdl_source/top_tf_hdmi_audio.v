@@ -60,8 +60,9 @@
 module top(
     input                       clk,            // 【输入】板载系统时钟，约 50 MHz
     input                       rst_n,          // 【输入】外部低有效总复位
-    input                       key1,           // 【输入】手动切换到下一张图片
-    input                       key2,           // 【输入】自动轮播开/关
+    input                       key1,           // 板上 KEY2（B2）：按下并松开切下一张
+    input                       key2,           // 板上 KEY4（C1）：短按轮播开/关，长按上一张
+    input                       key3,           // 板上 KEY3（B1）：短按切换 PCM/琶音
 
 	output [5:0]                seg_sel,        // 【输出到 seg_scan/数码管】位选
 	output [7:0]                seg_data,       // 【输出到数码管】段选数据
@@ -96,6 +97,7 @@ parameter FRAME_PIXELS  = 24'd307200;     // 640*480，单位是 32 bit 像素�
 // 0: test sine before the first displayed frame, then image-linked arpeggios.
 // 1: continuous 3 kHz HDMI test sine. Volume is 0..255 / 256.
 parameter AUDIO_TEST_ONLY = 0;
+parameter AUDIO_PCM_ENABLE = 1;
 parameter [7:0] AUDIO_VOLUME = 8'd192;
 
 // 四个帧缓冲区的首地址。这里是 SDRAM 应用接口的“字地址”，不是字节地址。
@@ -143,6 +145,10 @@ wire [7:0]  debug_scan_error;
 wire        debug_source_ready;
 wire        debug_load_busy;
 wire [7:0]  debug_load_error;
+wire signed [15:0] pcm_stream_sample;
+wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
+wire pcm_mode;
+wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
 wire [3:0]  debug_scanner_state;
 wire [31:0] debug_sector_lba;
@@ -384,15 +390,21 @@ end
 //   输入：按键、SD_MISO、写帧完成通知
 //   输出：SD SPI 信号、写帧请求、像素写入流、双缓冲索引
 sd_card_bmp_fat32 #(
+    .PCM_ENABLE(AUDIO_PCM_ENABLE && !AUDIO_TEST_ONLY),
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
     .SCAN_START_SECTOR (32'd0),       // 参数：从扇区 0 开始扫描
     .SCAN_MAX_SECTOR   (32'd131071),  // 参数：最多扫描到的扇区
     .SCAN_TARGET_COUNT (3'd4)         // 参数：最多记录 4 张 BMP
 ) sd_card_bmp_fat32_m0(
+    .pixel_clk(video_clk), .pcm_ready(pcm_stream_ready), .pcm_sample(pcm_stream_sample),
+    .pcm_valid(pcm_stream_valid), .pcm_active(pcm_stream_active),
+    .pcm_end(), .pcm_underflow(), .pcm_error(pcm_stream_error),
+    .pcm_mode(pcm_mode),
     .clk               (sd_card_clk),          // 输入：SD 卡/BMP 控制时钟
     .rst               (rst_all),              // 输入：统一高有效复位
     .key_next          (key1),                 // 输入：手动下一张按键
     .key_auto          (key2),                 // 输入：自动轮播按键
+    .key_audio_mode    (key3),                 // 输入：独立音源切换按键
     // state_code 只用于数码管调试，不参与图像数据传输。
     .state_code        (state_code),           // 输出：当前扫描/加载状态码
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
@@ -460,7 +472,8 @@ uart_debug_logger #(
     .state_code     (state_code),
     .scan_busy      (debug_scan_busy),
     .scan_done      (debug_scan_done),
-    .scan_error     (debug_scan_error | debug_load_error),
+    .scan_error     (pcm_stream_error != 0 ? pcm_stream_error :
+                     debug_load_error != 0 ? debug_load_error : debug_scan_error),
     .display_valid  (display_valid),
     .rx_data        (uart_rx_data),
     .scanner_state  (debug_scanner_state),
@@ -596,6 +609,7 @@ wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
+                         (pcm_stream_error != 0) ? pcm_stream_error :
                          (debug_load_error != 0) ? debug_load_error : debug_scan_error;
 wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
                        osd_mem_snapshot[7:0] : osd_sd_snapshot[7:0];
@@ -827,8 +841,12 @@ startup_pulse #(
 // PCM/ACR are generated in the pixel domain from the actually selected bank.
 // The bridge's existing input synchronizers also accept same-clock signals.
 media_hdmi_audio_bridge #(
+    .PCM_ENABLE(AUDIO_PCM_ENABLE),
     .CLOCK_HZ(25_000_000), .TEST_ONLY(AUDIO_TEST_ONLY), .VOLUME(AUDIO_VOLUME)
 ) u_media_hdmi_audio_bridge (
+    .pcm_active(pcm_stream_active), .pcm_valid(pcm_stream_valid),
+    .pcm_mode_sd(pcm_mode),
+    .stream_sample(pcm_stream_sample), .pcm_ready(pcm_stream_ready),
     .pixel_clk(video_clk), .rst(rst_all),
     .display_valid_sd(video_display_valid), .media_id_sd(video_disp_buf_idx),
     .commit_toggle_sd(display_commit_toggle),

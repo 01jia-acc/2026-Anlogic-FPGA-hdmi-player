@@ -4,7 +4,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildDir = Join-Path $PSScriptRoot 'build'
 New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
 $rtl = Join-Path $repoRoot 'src\user_source\hdl_source'
-$audio = @('pcm_test_tone.v','pcm_media_tone.v','media_hdmi_audio_bridge.v') |
+$audio = @('pcm_test_tone.v','pcm_media_tone.v','media_hdmi_audio_bridge.v','pcm_stream_buffer.v') |
     ForEach-Object { Join-Path $rtl "audio\$_" }
 $output = Join-Path $buildDir 'tb_four_buffer_audio.vvp'
 & (Join-Path $IverilogBin 'iverilog.exe') -g2005-sv -Wall -s tb_four_buffer_audio -o $output -y (Join-Path $rtl 'SD') (Join-Path $PSScriptRoot 'tb_four_buffer_audio.v') @audio

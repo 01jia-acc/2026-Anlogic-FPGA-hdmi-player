@@ -49,6 +49,10 @@ module fat32_volume_scanner (
     output reg  [31:0] resource1_size,
     output reg  [31:0] resource2_size,
     output reg  [31:0] resource3_size,
+    // 可选音频：原始 48 kHz / s16le / mono，根目录 AUDIO.PCM。
+    output reg         audio_resource_valid,
+    output reg  [31:0] audio_cluster,
+    output reg  [31:0] audio_size,
     // 调试观察口：只把扫描器内部状态照出，不参与控制逻辑。
     output wire [3:0]  debug_state,
     output wire [15:0] debug_sector_done_count,
@@ -116,6 +120,8 @@ module fat32_volume_scanner (
     // bit0~bit3 分别表示当前目录项是否仍可能是 PIC1~PIC4.BMP。
     // 每收到一个文件名字符，就把不匹配的候选位置 0。
     reg [3:0] dir_name_match;
+    reg dir_audio_match;
+    reg directory_ended;
     reg [7:0] dir_cluster_31_24;
     reg [7:0] dir_cluster_23_16;
     reg [7:0] dir_cluster_15_8;
@@ -202,6 +208,24 @@ module fat32_volume_scanner (
         end
     endfunction
 
+    function [7:0] audio_name_byte;
+        input [3:0] offset;
+        begin
+            case (offset)
+                0: audio_name_byte = "A";
+                1: audio_name_byte = "U";
+                2: audio_name_byte = "D";
+                3: audio_name_byte = "I";
+                4: audio_name_byte = "O";
+                5,6,7: audio_name_byte = " ";
+                8: audio_name_byte = "P";
+                9: audio_name_byte = "C";
+                10: audio_name_byte = "M";
+                default: audio_name_byte = 0;
+            endcase
+        end
+    endfunction
+
     // task 只是在当前时序块中复用两次非阻塞赋值；它不代表软件子程序，
     // 综合后仍然只是 state/fs_error 的普通寄存器赋值。
     task finish_with_error;
@@ -225,6 +249,11 @@ module fat32_volume_scanner (
             data_start_lba     <= 32'd0;
             max_cluster        <= 32'd0;
             resource_valid     <= 4'd0;
+            audio_resource_valid <= 1'b0;
+            audio_cluster <= 0;
+            audio_size <= 0;
+            dir_audio_match <= 0;
+            directory_ended <= 0;
             resource0_cluster  <= 32'd0;
             resource1_cluster  <= 32'd0;
             resource2_cluster  <= 32'd0;
@@ -278,6 +307,10 @@ module fat32_volume_scanner (
                     if (scan_start) begin
                         fs_error <= ERR_NONE;
                         resource_valid <= 4'd0;
+                        audio_resource_valid <= 1'b0;
+                        audio_cluster <= 0;
+                        audio_size <= 0;
+                        directory_ended <= 0;
                         sector_done_count <= 16'd0;
                         state <= ST_READ0_REQ;
                     end
@@ -403,6 +436,8 @@ module fat32_volume_scanner (
                         case (sector_byte_index[4:0])
                             5'd0: begin
                                 dir_first_byte <= sector_byte;
+                                dir_audio_match <= (sector_byte == "A");
+                                if (sector_byte == 0) directory_ended <= 1'b1;
                                 dir_name_match[0] <=
                                     (sector_byte == pic_name_byte(2'd0, 4'd0));
                                 dir_name_match[1] <=
@@ -414,6 +449,8 @@ module fat32_volume_scanner (
                             end
                             5'd1, 5'd2, 5'd3, 5'd4, 5'd5,
                             5'd6, 5'd7, 5'd8, 5'd9, 5'd10: begin
+                                if (sector_byte != audio_name_byte(sector_byte_index[3:0]))
+                                    dir_audio_match <= 1'b0;
                                 if (sector_byte !=
                                     pic_name_byte(2'd0, sector_byte_index[3:0]))
                                     dir_name_match[0] <= 1'b0;
@@ -441,10 +478,17 @@ module fat32_volume_scanner (
                                 // 目录项在本拍已经收齐。最后一个文件大小字节
                                 // 直接使用 sector_byte，避免非阻塞赋值尚未更新
                                 // dir_size_31_24 的时序陷阱。
-                                if (dir_first_byte != 8'h00 &&
+                                if (!directory_ended && dir_first_byte != 8'h00 &&
                                     dir_first_byte != 8'he5 &&
                                     (dir_attr & 8'h0f) != 8'h0f &&
-                                    (dir_attr & 8'h10) == 8'h00) begin
+                                    (dir_attr & 8'h18) == 8'h00) begin
+                                    if (dir_audio_match && !audio_resource_valid) begin
+                                        audio_cluster <= {dir_cluster_31_24, dir_cluster_23_16,
+                                                          dir_cluster_15_8, dir_cluster_7_0};
+                                        audio_size <= {sector_byte, dir_size_23_16,
+                                                       dir_size_15_8, dir_size_7_0};
+                                        audio_resource_valid <= 1'b1;
+                                    end
                                     if (dir_name_match[0]) begin
                                         resource0_cluster <=
                                             {dir_cluster_31_24, dir_cluster_23_16,

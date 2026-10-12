@@ -6,7 +6,7 @@ module tb_four_buffer_audio;
     reg sd_clk=0, pix_clk=0, rst=1;
     always #5 sd_clk=~sd_clk;
     always #20 pix_clk=~pix_clk;
-    reg key_next=1, key_auto=1, frame_req=0, write_toggle=0;
+    reg key_next=1, key_auto=1, key_audio_mode=1, frame_req=0, write_toggle=0;
     reg scan_done=0, source_done=0;
     reg [3:0] resources=4'b1111;
     reg [7:0] source_error=0;
@@ -17,8 +17,10 @@ module tb_four_buffer_audio;
     wire [23:0] audio_left;
     integer load_count=0;
 
-    sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200)) control (
+    sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200), .PCM_ENABLE(1)) control (
         .clk(sd_clk), .rst(rst), .key_next(key_next), .key_auto(key_auto),
+        .key_audio_mode(key_audio_mode),
+        .pixel_clk(pix_clk), .pcm_ready(1'b0),
         .bmp_width(16'd640), .bmp_height(16'd480),
         .display_valid(display_valid), .state_code(state_code),
         .write_finish_toggle(write_toggle), .write_buf_idx(write_bank),
@@ -112,7 +114,7 @@ module tb_four_buffer_audio;
     task reset_control;
         begin
             @(negedge sd_clk); rst=1; write_toggle=0; source_done=0; source_error=0;
-            key_next=1; key_auto=1;
+            key_next=1; key_auto=1; key_audio_mode=1;
             repeat(10) @(negedge sd_clk);
             rst=0; load_count=0;
         end
@@ -150,12 +152,46 @@ module tb_four_buffer_audio;
             if(audio_toggle!==saved_toggle) $fatal(1,"Preloading changed the melody");
         end
         if(control.image_complete!==4'b1111 || load_count!=4) $fatal(1,"Four-bank preload failed");
+        // Board KEY3: reject bounce, switch on a short press, never change images.
+        repeat(4) begin
+            @(negedge sd_clk); key_audio_mode=0;
+            repeat(5) @(negedge sd_clk);
+            key_audio_mode=1;
+            repeat(5) @(negedge sd_clk);
+        end
+        repeat(65) @(negedge sd_clk);
+        if(control.pcm_mode) $fatal(1,"KEY3 bounce switched audio mode");
+        @(negedge sd_clk); key_audio_mode=0;
+        repeat(65) @(negedge sd_clk);
+        if(!control.pcm_mode || display_bank!=0 || control.auto_play_en)
+            $fatal(1,"Short KEY3 did not switch only the audio mode");
+        key_audio_mode=1;
+        repeat(65) @(negedge sd_clk);
+        if(!control.pcm_mode || display_bank!=0) $fatal(1,"KEY3 release changed mode/image");
+        // A second press switches back; holding it must not repeat.
+        @(negedge sd_clk); key_audio_mode=0;
+        repeat(65) @(negedge sd_clk);
+        if(control.pcm_mode) $fatal(1,"Second KEY3 press did not switch back");
+        repeat(600) @(negedge sd_clk);
+        if(control.pcm_mode || display_bank!=0) $fatal(1,"Held KEY3 repeated or changed image");
+        key_audio_mode=1;
+        repeat(65) @(negedge sd_clk);
+        // Board KEY2 long hold no longer changes audio; release advances once.
+        @(negedge sd_clk); key_next=0;
+        repeat(600) @(negedge sd_clk);
+        if(control.pcm_mode || display_bank!=0) $fatal(1,"Held KEY2 switched audio/image");
+        key_next=1;
+        repeat(65) @(negedge sd_clk);
+        if(control.pcm_mode || display_bank!=1) $fatal(1,"KEY2 release did not advance once");
+        for(i=2;i<=4;i=i+1) next_key;
+        frame(0);
         for(i=1;i<=4;i=i+1) begin
             next_key;
+            if(control.pcm_mode) $fatal(1,"Short KEY2 changed audio mode");
             if(audio.media_id!==pix_bank) $fatal(1,"Audio changed before video");
             frame(i%4);
         end
-        // KEY2 long press: 0 -> 3. Short press toggles automatic playback.
+        // Board KEY4 long press: 0 -> 3. Short press toggles automatic playback.
         auto_key(280); frame(3);
         auto_key(65);
         wait(control.auto_play_en);
@@ -188,7 +224,7 @@ module tb_four_buffer_audio;
         saved_toggle=audio_toggle;
         next_key; frame(0);
         if(audio_toggle!==saved_toggle) $fatal(1,"Failed image changed audio");
-        $display("PASS: four-bank preload, both completion orders, frame/audio commit, next/previous/auto, sparse/single image and failed load");
+        $display("PASS: KEY3 short/bounce/hold, KEY2 image-only, four-bank preload, frame/audio commit, next/previous/auto, sparse/single image and failed load");
         $finish;
     end
     initial begin #5000000; $fatal(1,"Four-buffer audio test timeout"); end

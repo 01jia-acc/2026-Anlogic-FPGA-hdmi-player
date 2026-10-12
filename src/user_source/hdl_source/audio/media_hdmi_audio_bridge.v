@@ -5,6 +5,7 @@
 module media_hdmi_audio_bridge #(
     parameter integer CLOCK_HZ = 25_000_000,
     parameter integer TEST_ONLY = 0,
+    parameter integer PCM_ENABLE = 0,
     parameter [7:0] VOLUME = 8'd192,
     parameter integer BLIP_SAMPLES = 4800,
     parameter integer NOTE_SAMPLES = 12000
@@ -14,6 +15,10 @@ module media_hdmi_audio_bridge #(
     input  wire        display_valid_sd,
     input  wire [1:0]  media_id_sd,
     input  wire        commit_toggle_sd,
+    input wire pcm_active, pcm_valid,
+    input wire pcm_mode_sd,
+    input wire signed [15:0] stream_sample,
+    output wire pcm_ready,
     output reg         audio_valid,
     output reg  [23:0] audio_left_data,
     output reg  [23:0] audio_right_data,
@@ -67,20 +72,27 @@ module media_hdmi_audio_bridge #(
     wire use_media = media_active && (TEST_ONLY == 0);
     wire signed [15:0] test_sample;
     wire signed [15:0] media_sample;
-    wire signed [15:0] selected_sample = use_media ? media_sample : test_sample;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] pcm_mode_sync;
+    always @(posedge pixel_clk or posedge rst)
+        if (rst) pcm_mode_sync <= 0;
+        else pcm_mode_sync <= {pcm_mode_sync[0], pcm_mode_sd};
+    wire use_pcm = PCM_ENABLE && !TEST_ONLY && pcm_mode_sync[1] && pcm_active;
+    assign pcm_ready = sample_tick && use_pcm;
+    wire signed [15:0] selected_sample = use_pcm ? (pcm_valid ? stream_sample : 16'sd0) :
+                                       use_media ? media_sample : test_sample;
     wire signed [24:0] scaled_sample = selected_sample * $signed({1'b0, VOLUME});
-    // Both sources peak at 12000, so scaling by 0..255 / 256 never clips.
+    // Gain is 0..255 / 256, so even full-scale signed file samples cannot clip.
     wire signed [15:0] pcm_sample = scaled_sample >>> 8;
 
     pcm_test_tone u_test_tone (
-        .clk(pixel_clk), .rst(rst), .enable(!use_media),
+        .clk(pixel_clk), .rst(rst), .enable(!use_media && !use_pcm),
         .sample_tick(sample_tick), .sample(test_sample), .rom_index()
     );
 
     pcm_media_tone #(
         .BLIP_SAMPLES(BLIP_SAMPLES), .NOTE_SAMPLES(NOTE_SAMPLES)
     ) u_media_tone (
-        .clk(pixel_clk), .rst(rst), .enable(use_media),
+        .clk(pixel_clk), .rst(rst), .enable(use_media && !use_pcm),
         .sample_tick(sample_tick), .media_id(media_id),
         .sample(media_sample), .blip_active()
     );

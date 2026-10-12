@@ -56,15 +56,22 @@ module sd_card_bmp_fat32 #(
     // 自动键按住超过该毫秒数判为"长按"（长按触发"上一张"）。
     parameter integer LONG_PRESS_MS     = 1000,
     // 一次加载的最长允许时间；超过则发 load_abort 并报错（防坏卡永久卡死）。
-    parameter integer LOAD_TIMEOUT_MS   = 5_000
+    parameter integer LOAD_TIMEOUT_MS   = 5_000,
+    parameter integer PCM_ENABLE = 0
 ) (
     // ===================== 端口：系统时钟/复位 =====================
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
     input  wire        rst,            // 高有效复位
+    input wire pixel_clk, pcm_ready,
+    output wire signed [15:0] pcm_sample,
+    output wire pcm_valid, pcm_active, pcm_end, pcm_underflow,
+    output wire [7:0] pcm_error,
+    output reg pcm_mode,
 
     // ===================== 端口：按键（低有效原始输入，内部会同步+去抖） =====================
     input  wire        key_next,       // "下一张"按键
     input  wire        key_auto,       // "自动"键：短按=轮播开/关，长按=上一张
+    input  wire        key_audio_mode, // 板上 KEY3：短按切换 PCM/琶音
 
     // bmp_width/bmp_height 与旧版扫描参数一样仅为顶层兼容保留；FAT32 目录
     // 扫描提供图片列表，bmp24_decoder 内部校验固定的 640x480 格式。
@@ -127,6 +134,9 @@ module sd_card_bmp_fat32 #(
     // ========================================================================
     // 去抖模块输出的单拍按下事件，以及自动键的稳定电平。
     wire key_next_press;     // "下一张"的单拍按下脉冲（去抖后）
+    wire key_next_stable;
+    reg next_down_seen, next_release_pulse;
+    wire key_audio_mode_press;
     wire key_auto_press;     // "自动"键的单拍按下脉冲（去抖后）
     wire key_auto_stable;    // "自动"键稳定电平（1=松开，0=按住；长按计时用）
 
@@ -291,7 +301,7 @@ module sd_card_bmp_fat32 #(
         .CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(50)
     ) u_key_next (
         .clk(clk), .rst(rst), .button_in(key_next),
-        .press_pulse(key_next_press), .button_stable_out()
+        .press_pulse(key_next_press), .button_stable_out(key_next_stable)
     );
 
     // ========================================================================
@@ -305,13 +315,42 @@ module sd_card_bmp_fat32 #(
         .press_pulse(key_auto_press), .button_stable_out(key_auto_stable)
     );
 
+    // 独立音源键：同步并消抖，只在稳定按下时产生一次切换事件。
+    key_press_debounce_fat32 #(
+        .CLK_FREQ_HZ(CLK_FREQ_HZ), .DEBOUNCE_MS(50)
+    ) u_key_audio_mode (
+        .clk(clk), .rst(rst), .button_in(key_audio_mode),
+        .press_pulse(key_audio_mode_press), .button_stable_out()
+    );
+
+    // 板上 KEY2 松开切图；KEY3 短按切音源，按住不会重复切换。
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pcm_mode <= 0;
+            next_down_seen <= 0; next_release_pulse <= 0;
+        end else begin
+            next_release_pulse <= 0;
+            if (PCM_ENABLE && key_audio_mode_press) pcm_mode <= ~pcm_mode;
+            if (key_next_press) next_down_seen <= 1;
+            if (key_next_stable && next_down_seen) begin
+                next_release_pulse <= 1;
+                next_down_seen <= 0;
+            end
+        end
+    end
+
     // ========================================================================
     // 实例：u_image_source —— 存储/解码子系统（本模块的"手"）
     // ========================================================================
     // 顶层只传递"扫描/加载"和"帧写入"握手，存储细节全部在它内部：
     //   sd_card_top(SPI 驱动) → 扇区适配器 → 扫描器/文件流 → BMP 解码。
-    sd_fat32_image_source u_image_source (
+    sd_fat32_image_source #(.PCM_ENABLE(PCM_ENABLE)) u_image_source (
         .clk(clk), .rst(rst),
+        .pixel_clk(pixel_clk), .pcm_ready(pcm_ready), .pcm_sample(pcm_sample),
+        .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
+        .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
+        .pcm_play_enable(scan_completed && !load_busy &&
+                         (preload_halted || preload_next_idx >= img_found_count)),
         // ---- 扫描事务：顶层发脉冲，source 回报 busy/结果 ----
         .scan_start(scan_start_pulse), .scan_busy(scan_busy),
         .scan_done(scan_done), .scan_error(scan_error),
@@ -700,7 +739,7 @@ module sd_card_bmp_fat32 #(
                     // 按键只选择已驻留图片，不再发起 SD 文件读取。
 
                     // ---- (h1) 按键事件 → 挂起请求 ----
-                    if (key_next_press)
+                    if (next_release_pulse)
                         next_req_pending <= 1'b1;    // "下一张"先记着
                     if (key_auto_press)
                         key_auto_down_seen <= 1'b1;  // 记录本次按住有按下事件
