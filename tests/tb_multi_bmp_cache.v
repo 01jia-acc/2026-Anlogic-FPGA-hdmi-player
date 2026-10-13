@@ -58,6 +58,7 @@ module tb_multi_bmp_cache;
         integer slot, logical;
         begin
             wait(dut.load_busy);
+            wait(dut.load_prepare == 0);
             repeat(4) @(negedge clk);
             bank=write_bank;
             if(dut.load_idx!==expected[3:0]) $fatal(1,"Wrong logical load id");

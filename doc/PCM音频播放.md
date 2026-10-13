@@ -84,6 +84,7 @@ HDMI 桥始终保持 48 kHz 样本节拍和原有 ACR；预填充或缺数据时
 ./tests/run_multi_bmp_tests.ps1
 ./tests/run_pcm_tests.ps1
 ./tests/run_integration_tests.ps1
+./tests/run_read_diagnostic_tests.ps1
 ./tests/run_audio_tests.ps1
 python tests/test_wav_to_pcm.py
 python tests/test_bmp_tools.py
@@ -92,7 +93,7 @@ python tests/test_bmp_tools.py
 
 PCM 仿真使用真实扫描器、FAT 文件流、扇区适配器、异步缓冲和 HDMI 桥，只替代物理 SPI 卡响应。覆盖分散簇、缓冲回卷和反压、连续三轮播放、跨循环边界暂停续播、有符号极值、HDMI 增益和左右声道一致、最后不满扇区、1／7／256／257 样本短文件、后续一轮坏簇链停止循环、删除项、目录结束标记、卷标、空文件、奇数长度、坏簇链及读超时。原有回归同时检查四 bank 读写、图片提交与琶音同步；新增板上 KEY3 短按切换、抖动过滤、按住不重复、不切图，以及 KEY2 只切图不切音源的验证。
 
-当前预缓存版下载文件为 `tests/build/pcm_audio_release/hdmi_prefetch_audio.bit`，与同目录的 `hdmi_four_buffer_audio.bit`、`hdmi_pcm_loop.bit`、`hdmi_multi_bmp_audio.bit` 内容一致。成功构建后，脚本会备份并同步工程 `Runs/phy_1` 和 `Runs/best_result` 中已有的下载 bit，避免再次下载旧版；备份保存在 `tests/build/pcm_audio_release/previous_gui_bitstreams`。仅同步下载文件，构建数据库及最终时序报告仍以 `pcm_audio_release` 目录为准。生成 bitstream 不代表已实现时序收敛或板上验证。
+当前预缓存修正版下载文件为 `tests/build/pcm_audio_release/hdmi_prefetch_pipeline_audio.bit`，与同目录的 `hdmi_prefetch_audio.bit`、`hdmi_four_buffer_audio.bit`、`hdmi_pcm_loop.bit`、`hdmi_multi_bmp_audio.bit` 内容一致。成功构建后，脚本会备份并同步工程 `Runs/phy_1` 和 `Runs/best_result` 中已有的下载 bit，避免再次下载旧版；备份保存在 `tests/build/pcm_audio_release/previous_gui_bitstreams`。仅同步下载文件，构建数据库及最终时序报告仍以 `pcm_audio_release` 目录为准。生成 bitstream 不代表已实现时序收敛或板上验证。
 
 2026-10-11 验证结果：上述 PCM、四 bank、琶音仿真以及转换工具测试通过；TD 综合、布局布线和 bitstream 生成成功。资源使用 LUT 9954/19600、寄存器 6536/19600、BRAM 29/64、DSP 6/29、PLL 2/4。最终 SWNS=-6.565 ns、HWNS=-1.530 ns，仍存在建立和保持时间违例，尚未时序收敛，也尚未在实际 TF 卡和 HDMI 显示器上验证。新增缓冲已被综合为 BRAM。
 
@@ -101,3 +102,5 @@ PCM 仿真使用真实扫描器、FAT 文件流、扇区适配器、异步缓冲
 2026-10-13 多图片更新：支持最多 16 张 BMP 和四 bank 按需缓存。PCM 仿真新增读取完整 640×480 BMP 时让出 SD 通道、缓冲耗尽静音、恢复原播放位置及三轮循环的验证，与多图片、原有集成、音频及转换工具回归均通过。重新生成下载位流，资源 LUT 12062/19600、寄存器 8419/19600、BRAM 29/64、DSP 10/29、PLL 2/4；最终 SWNS=-6.565 ns、HWNS=-1.540 ns，仍未时序收敛。多图片版本尚未上板验证。
 
 2026-10-13 后台预缓存更新：显示当前图片时预读下一张，预读完成不换画面或琶音；已缓存切图不关闭 PCM 读取许可。PCM 与 BMP 改为整扇区仲裁，避免整张图片读取期间停止补充音频。仿真覆盖完整 640×480 BMP 与 PCM 交替读取、无缓冲欠载、样本顺序正确、图片像素不混入音频，以及已授予但尚未发出的音频请求被撤销后恢复；PCM、多图片、集成和音频回归通过。TD 综合、布局布线和位流生成成功，资源 LUT 12355/19600、寄存器 8426/19600、BRAM 29/64、DSP 10/29、PLL 2/4；最终 SWNS=-6.565 ns、HWNS=-1.519 ns，仍未时序收敛，新版尚未上板验证。按用户要求只保存本地 Git，不推送 GitHub；位流及构建报告保存在本地，不纳入 Git 提交。
+
+2026-10-13 预缓存读取修正：初版上板图片停止加载，UART 为 `E=38`，但琶音和 PCM 正常；同卡旧位流可正常播放。修正版分拍查询图片参数、分拍计算簇地址，保留真实 FAT 错误，并在串口增加加载序号 `J`、首簇 `K`、文件大小 `Z`。PCM 文件流同样使用分拍地址计算；完整 BMP/PCM 交替读取、音频样本顺序及循环回归通过，新增八种 FAT32 簇大小、原始错误传播与 UART 报文验证通过。位流已生成，资源 LUT 12191/19600、寄存器 8727/19600、BRAM 29/64、DSP 2/29、PLL 2/4；SWNS=-6.565 ns、HWNS=-1.540 ns，SD 域最差建立裕量 -0.703 ns，仍未时序收敛，修正版尚待上板验证。故障日志和使用方法见 [多图片播放](多图片播放.md)。

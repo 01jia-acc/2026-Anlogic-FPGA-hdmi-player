@@ -78,6 +78,9 @@ module sd_card_bmp_fat32 #(
     output wire        debug_source_ready,
     output wire        debug_load_busy,
     output wire [7:0]  debug_load_error,
+    output wire [4:0]  debug_load_image_number,
+    output wire [31:0] debug_load_cluster,
+    output wire [31:0] debug_load_size,
     // FAT/SD 细粒度诊断观察口，供顶层 UART 周期打印。
     output wire [3:0]  debug_scanner_state,
     output wire [31:0] debug_sector_lba,
@@ -124,6 +127,9 @@ module sd_card_bmp_fat32 #(
     reg [31:0] auto_cnt, long_press_cnt, load_timeout_cnt;
     reg key_auto_down_seen, long_press_marked, next_down_seen, next_release_pulse;
     reg load_busy, source_done_seen, write_done_seen;
+    reg [1:0] load_prepare;
+    reg [3:0] lookup_slot, lookup_image;
+    reg [31:0] load_cluster_lut, load_size_lut;
     reg [2:0] wrfin_tgl_sync;
     reg [7:0] last_error;
     wire key_next_press, key_next_stable, key_auto_press, key_auto_stable, key_audio_mode_press;
@@ -175,21 +181,11 @@ module sd_card_bmp_fat32 #(
             for(i=0;i<16;i=i+1) resource_count=resource_count+mask[i];
         end
     endfunction
-    function [31:0] resource_lut;
-        input [3:0] index;
-        input [15:0] mask;
-        input [511:0] values;
-        integer i, found;
-        begin
-            resource_lut=0; found=0;
-            for(i=0;i<16;i=i+1) if(mask[i]) begin
-                if(found==index) resource_lut=values[i*32 +: 32];
-                found=found+1;
-            end
-        end
-    endfunction
-    wire [31:0] load_cluster_lut = resource_lut(load_idx,image_resource_valid,image_clusters);
-    wire [31:0] load_size_lut = resource_lut(load_idx,image_resource_valid,image_sizes);
+    // 每拍查看一个目录槽，避免16槽计数/选择串成单周期长路径。
+    // 查到后将参数保持在寄存器中，下一阶段才发 load_start。
+    assign debug_load_image_number = {1'b0,load_idx} + 5'd1;
+    assign debug_load_cluster = load_cluster_lut;
+    assign debug_load_size = load_size_lut;
     assign display_image_id = img_idx;
     assign debug_auto_enabled = auto_play_en;
     assign state_code = !sd_init_done ? 4'd0 : scan_busy ? 4'd1 :
@@ -237,7 +233,7 @@ module sd_card_bmp_fat32 #(
         .pixel_clk(pixel_clk), .pcm_ready(pcm_ready), .pcm_sample(pcm_sample),
         .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
         .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
-        .pcm_play_enable(scan_completed && !image_read_needed &&
+        .pcm_play_enable(scan_completed && load_prepare == 0 && !image_read_needed &&
                          (preload_halted || preload_finished)),
         // ---- 扫描事务：顶层发脉冲，source 回报 busy/结果 ----
         .scan_start(scan_start_pulse), .scan_busy(scan_busy),
@@ -285,6 +281,8 @@ module sd_card_bmp_fat32 #(
             auto_play_en<=0; auto_cnt<=0; long_press_cnt<=0;
             key_auto_down_seen<=0; long_press_marked<=0;
             load_busy<=0; source_done_seen<=0; write_done_seen<=0;
+            load_prepare<=0; lookup_slot<=0; lookup_image<=0;
+            load_cluster_lut<=0; load_size_lut<=0;
             load_timeout_cnt<=0; wrfin_tgl_sync<=0; last_error<=0;
         end else begin
             scan_start_pulse<=0; load_start_pulse<=0; load_abort_pulse<=0;
@@ -293,6 +291,7 @@ module sd_card_bmp_fat32 #(
                 scan_kicked<=0; scan_completed<=0; display_valid<=0;
                 image_complete<=0; img_found_count<=0; image_resource_valid<=0;
                 preload_next_idx<=0; preload_halted<=0; load_busy<=0;
+                load_prepare<=0;
                 source_done_seen<=0; write_done_seen<=0;
                 next_req_pending<=0; prev_req_pending<=0; auto_play_en<=0; auto_cnt<=0;
             end else begin
@@ -310,7 +309,23 @@ module sd_card_bmp_fat32 #(
                     last_error<=scan_error;
                 end
                 if(load_busy) begin
-                    if(source_load_done && source_load_error != 0) begin
+                    if(load_prepare == 1) begin
+                        if(image_resource_valid[lookup_slot] && lookup_image == load_idx) begin
+                            load_cluster_lut <= image_clusters[lookup_slot*32 +:32];
+                            load_size_lut <= image_sizes[lookup_slot*32 +:32];
+                            load_prepare <= 2;
+                        end else if(lookup_slot == 15) begin
+                            load_busy<=0; load_prepare<=0;
+                            preload_halted<=1; last_error<=8'h22;
+                        end else begin
+                            lookup_slot <= lookup_slot + 1'b1;
+                            if(image_resource_valid[lookup_slot]) lookup_image<=lookup_image+1'b1;
+                        end
+                    end else if(load_prepare == 2) begin
+                        if(source_ready) begin
+                            load_start_pulse<=1; load_prepare<=0;
+                        end
+                    end else if(source_load_done && source_load_error != 0) begin
                         load_busy<=0; preload_halted<=1; last_error<=source_load_error;
                         source_done_seen<=0; write_done_seen<=0;
                     end else if(load_timeout_cnt >= LOAD_TIMEOUT_CYCLES) begin
@@ -365,7 +380,7 @@ module sd_card_bmp_fat32 #(
                             load_idx<={1'b0,preload_next_idx};
                             write_buf_idx<=preload_next_idx[1:0];
                             load_is_demand<=0; load_is_prefetch<=0;
-                            load_start_pulse<=1; load_busy<=1;
+                            load_prepare<=1; lookup_slot<=0; lookup_image<=0; load_busy<=1;
                             source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                         end
                     end else if((!load_busy || load_is_prefetch) && preload_finished &&
@@ -384,7 +399,7 @@ module sd_card_bmp_fat32 #(
                             load_idx<=wanted_idx; write_buf_idx<=victim_bank;
                             image_complete[victim_bank]<=0;
                             load_is_demand<=1; load_is_prefetch<=0;
-                            load_start_pulse<=1; load_busy<=1;
+                            load_prepare<=1; lookup_slot<=0; lookup_image<=0; load_busy<=1;
                             source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                             if(next_req_pending) next_req_pending<=0;
                             else prev_req_pending<=0;
@@ -396,7 +411,7 @@ module sd_card_bmp_fat32 #(
                         load_idx<=next_idx; write_buf_idx<=victim_bank;
                         image_complete[victim_bank]<=0;
                         load_is_demand<=0; load_is_prefetch<=1;
-                        load_start_pulse<=1; load_busy<=1;
+                        load_prepare<=1; lookup_slot<=0; lookup_image<=0; load_busy<=1;
                         source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                     end
                 end

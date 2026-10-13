@@ -656,7 +656,10 @@ module sd_fat32_image_source #(
                             // 收尾：报完成事件，汇总错误码（decoder 优先于 streamer），
                             // 回到空闲等待下一次事务。
                             load_done <= 1'b1;
-                            if (decoder_error != 8'h00)
+                            // 38只是上游错误的包装；保留原始FAT错误供UART定位。
+                            if (decoder_error == 8'h38 && streamer_fs_error != 0)
+                                load_error <= streamer_fs_error;
+                            else if (decoder_error != 8'h00)
                                 load_error <= decoder_error;
                             else if (streamer_fs_error != 8'h00)
                                 load_error <= streamer_fs_error;

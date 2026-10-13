@@ -244,6 +244,26 @@ module tb_pcm_file;
             scenario=scenario+1;
         end
     endtask
+    task bad_bmp_chain;
+        input integer kind;
+        input [31:0] next_cluster;
+        input [7:0] expected_error;
+        begin
+            @(negedge clk); rst=1; allow_play=0; scan=0; mode=0;
+            received=0; image_start=0; image_pixels=0; image_commits=0;
+            run_kind=8; stall=0; prepare(3102,8);
+            put32(512+32*4,next_cluster);
+            repeat(8) @(negedge clk); rst=0; scan=1;
+            @(negedge clk); scan=0;
+            wait(scan_done); wait(dut.source_ready);
+            @(negedge clk); image_start=1;
+            @(negedge clk); image_start=0;
+            wait(image_done);
+            if(image_error!==expected_error || image_commits!=0 || image_pixels>=307200)
+                $fatal(1,"Original BMP FAT error lost: kind=%0d error=%h",kind,image_error);
+            $display("PASS BMP raw FAT error kind=%0d code=%h",kind,image_error);
+        end
+    endtask
     initial begin
         force dut.sd_init_done=1'b1;
         force dut.sd_sec_read_data=card_byte;
@@ -265,6 +285,9 @@ module tb_pcm_file;
         run_case(300,7,556,8'h25);
         run_case(7,6,0,8'h73);
         run_case(3102,8,27918,0);
+        bad_bmp_chain(0,32'h0fffffff,8'h25);
+        bad_bmp_chain(1,32'd32,8'h23);
+        bad_bmp_chain(2,32'd5000,8'h24);
         $display("PASS: FAT PCM loops, fragmented chain, FIFO wrap, pause/resume across EOF, later-loop errors, invalid entries, timeout, full BMP/PCM sector sharing without underflow and HDMI samples");
         $finish;
     end

@@ -86,6 +86,7 @@ module tb_four_buffer_audio;
         input integer bank;
         begin
             wait(control.load_busy && write_bank==bank);
+            wait(control.load_prepare == 0);
             repeat(3) @(negedge sd_clk);
             if (bank[0]) begin
                 write_toggle=~write_toggle;
@@ -214,6 +215,7 @@ module tb_four_buffer_audio;
         resources=4'b0010;
         reset_control; scan;
         wait(control.load_busy);
+        wait(control.load_prepare == 0);
         #1;
         if(control.load_cluster_lut!=20) $fatal(1,"Sparse FAT directory mapped wrong cluster: mask=%b cluster=%0d slot=%0d",control.image_resource_valid,control.load_cluster_lut,control.img_cluster1);
         finish_bank(0); frame(0);

@@ -27,13 +27,16 @@ module uart_debug_logger #(
     input  wire       sd_cmd_error_latched,
     input  wire [3:0] resource_valid,
     input  wire [15:0] sector_done_count,
+    input wire [4:0] load_image_number,
+    input wire [31:0] load_cluster, load_size,
     output wire       tx
 );
     localparam integer LOG_INTERVAL_CYCLES =
         (CLOCK_FREQ_HZ / 1000) * LOG_INTERVAL_MS;
     // 诊断行示例：
     // P=1 I=1 T=1 B=1 D=0 E=00 V=0 S=2 A=1 L=00000000 C=000 Q=06 X=0 F=0 N=0000 R=00\r\n
-    localparam integer MESSAGE_LENGTH = 80;
+    // J为加载的播放序号（十六进制、从1开始），K为首簇，Z为文件字节数。
+    localparam integer MESSAGE_LENGTH = 107;
 
     reg [31:0] interval_count;
     reg        boot_pending;
@@ -57,6 +60,8 @@ module uart_debug_logger #(
     reg        snap_sd_cmd_error_latched;
     reg [3:0]  snap_resource_valid;
     reg [15:0] snap_sector_done_count;
+    reg [4:0] snap_load_image_number;
+    reg [31:0] snap_load_cluster, snap_load_size;
 
     wire       tx_busy;
     wire [7:0] tx_byte;
@@ -153,8 +158,35 @@ module uart_debug_logger #(
                 7'd75: message_byte = "=";
                 7'd76: message_byte = hex_ascii(snap_rx_data[7:4]);
                 7'd77: message_byte = hex_ascii(snap_rx_data[3:0]);
-                7'd78: message_byte = 8'h0d;
-                7'd79: message_byte = 8'h0a;
+                7'd78: message_byte = " ";
+                7'd79: message_byte = "J";
+                7'd80: message_byte = "=";
+                7'd81: message_byte = hex_ascii({3'd0,snap_load_image_number[4]});
+                7'd82: message_byte = hex_ascii(snap_load_image_number[3:0]);
+                7'd83: message_byte = " ";
+                7'd84: message_byte = "K";
+                7'd85: message_byte = "=";
+                7'd86: message_byte = hex_ascii(snap_load_cluster[31:28]);
+                7'd87: message_byte = hex_ascii(snap_load_cluster[27:24]);
+                7'd88: message_byte = hex_ascii(snap_load_cluster[23:20]);
+                7'd89: message_byte = hex_ascii(snap_load_cluster[19:16]);
+                7'd90: message_byte = hex_ascii(snap_load_cluster[15:12]);
+                7'd91: message_byte = hex_ascii(snap_load_cluster[11:8]);
+                7'd92: message_byte = hex_ascii(snap_load_cluster[7:4]);
+                7'd93: message_byte = hex_ascii(snap_load_cluster[3:0]);
+                7'd94: message_byte = " ";
+                7'd95: message_byte = "Z";
+                7'd96: message_byte = "=";
+                7'd97: message_byte = hex_ascii(snap_load_size[31:28]);
+                7'd98: message_byte = hex_ascii(snap_load_size[27:24]);
+                7'd99: message_byte = hex_ascii(snap_load_size[23:20]);
+                7'd100: message_byte = hex_ascii(snap_load_size[19:16]);
+                7'd101: message_byte = hex_ascii(snap_load_size[15:12]);
+                7'd102: message_byte = hex_ascii(snap_load_size[11:8]);
+                7'd103: message_byte = hex_ascii(snap_load_size[7:4]);
+                7'd104: message_byte = hex_ascii(snap_load_size[3:0]);
+                7'd105: message_byte = 8'h0d;
+                7'd106: message_byte = 8'h0a;
                 default: message_byte = " ";
             endcase
         end
@@ -197,6 +229,7 @@ module uart_debug_logger #(
             snap_sd_cmd_error_latched <= 1'b0;
             snap_resource_valid <= 4'd0;
             snap_sector_done_count <= 16'd0;
+            snap_load_image_number<=0; snap_load_cluster<=0; snap_load_size<=0;
         end else begin
             // tx_start 是送给 uart_tx 的寄存器脉冲。由于两个 always 块在同一
             // 个时钟沿使用非阻塞赋值，当前 always 置 tx_start=1 后，uart_tx
@@ -226,6 +259,8 @@ module uart_debug_logger #(
                     snap_sd_cmd_error_latched <= sd_cmd_error_latched;
                     snap_resource_valid <= resource_valid;
                     snap_sector_done_count <= sector_done_count;
+                    snap_load_image_number<=load_image_number;
+                    snap_load_cluster<=load_cluster; snap_load_size<=load_size;
                     message_index      <= 7'd0;
                     message_active     <= 1'b1;
                     boot_pending       <= 1'b0;

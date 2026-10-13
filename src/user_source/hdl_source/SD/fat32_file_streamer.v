@@ -64,19 +64,41 @@ module fat32_file_streamer #(
 
     // 每一个状态都是“正在等待某种事件”的硬件阶段；REQ 发起扇区事务，
     // WAIT 接收字节并等待 done，PARSE 在扇区缓冲/寄存器准备好后计算下一步。
-    localparam ST_IDLE      = 3'd0;
-    localparam ST_DATA_REQ  = 3'd1;
-    localparam ST_DATA_WAIT = 3'd2;
-    localparam ST_FAT_REQ   = 3'd3;
-    localparam ST_FAT_WAIT  = 3'd4;
-    localparam ST_FAT_PARSE = 3'd5;
-    localparam ST_FINISH    = 3'd6;
+    localparam ST_IDLE      = 4'd0;
+    localparam ST_DATA_REQ  = 4'd1;
+    localparam ST_DATA_WAIT = 4'd2;
+    localparam ST_FAT_REQ   = 4'd3;
+    localparam ST_FAT_WAIT  = 4'd4;
+    localparam ST_FAT_PARSE = 4'd5;
+    localparam ST_FINISH    = 4'd6;
+    localparam ST_ADDR_SUB = 4'd7;
+    localparam ST_ADDR_SHIFT = 4'd8;
+    localparam ST_ADDR_SUM = 4'd9;
 
     localparam integer CHAIN_COUNT_WIDTH =
         (MAX_VISITED_CLUSTERS < 2) ? 1 : $clog2(MAX_VISITED_CLUSTERS + 1);
 
     // 主状态寄存器。
-    reg [2:0] state;
+    reg [3:0] state;
+    reg [2:0] spc_shift;
+    reg [31:0] cluster_relative, cluster_sector_offset;
+    function valid_spc;
+        input [7:0] spc;
+        begin
+            valid_spc = spc != 0 && (spc & (spc - 1'b1)) == 0;
+        end
+    endfunction
+    function [2:0] get_spc_shift;
+        input [7:0] spc;
+        begin
+            case(spc)
+                2: get_spc_shift=1; 4: get_spc_shift=2;
+                8: get_spc_shift=3; 16: get_spc_shift=4;
+                32: get_spc_shift=5; 64: get_spc_shift=6;
+                128: get_spc_shift=7; default: get_spc_shift=0;
+            endcase
+        end
+    endfunction
     // 当前正在输出的 FAT32 数据簇号。
     reg [31:0] current_cluster;
     // 尚未输出的文件字节数；每个有效数据字节减一。
@@ -123,6 +145,7 @@ module fat32_file_streamer #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= ST_IDLE;
+            spc_shift <= 0; cluster_relative <= 0; cluster_sector_offset <= 0;
             file_done         <= 1'b0;
             file_valid        <= 1'b0;
             file_byte         <= 8'd0;
@@ -192,19 +215,33 @@ module fat32_file_streamer #(
                         sector_in_cluster<= 8'd0;
                         chain_count      <= 1;
                         final_chain_check<= 1'b0;
+                        spc_shift <= get_spc_shift(sectors_per_cluster);
                         if (file_size == 0) begin
                             state <= ST_FINISH;
                         end else if (first_cluster < 2 ||
                                      first_cluster > max_cluster ||
-                                     sectors_per_cluster == 0) begin
+                                     !valid_spc(sectors_per_cluster)) begin
                             finish_with_error(ERR_CLUSTER_RANGE);
                         end else begin
                             current_cluster <= first_cluster;
-                            sector_lba <= data_start_lba +
-                                          (first_cluster - 2) * sectors_per_cluster;
-                            state <= ST_DATA_REQ;
+                            state <= ST_ADDR_SUB;
                         end
                     end
+                end
+
+                // FAT32每簇扇区数为2的幂，分三拍减法、移位、加法，
+                // 避免首簇到LBA的乘加长路径在100MHz下采错地址。
+                ST_ADDR_SUB: begin
+                    cluster_relative <= current_cluster - 32'd2;
+                    state <= ST_ADDR_SHIFT;
+                end
+                ST_ADDR_SHIFT: begin
+                    cluster_sector_offset <= cluster_relative << spc_shift;
+                    state <= ST_ADDR_SUM;
+                end
+                ST_ADDR_SUM: begin
+                    sector_lba <= data_start_lba + cluster_sector_offset;
+                    state <= ST_DATA_REQ;
                 end
 
                 ST_DATA_REQ: begin
@@ -283,10 +320,7 @@ module fat32_file_streamer #(
                     end else begin
                         chain_count <= chain_count + 1'b1;
                         current_cluster <= {4'd0, fat_value};
-                        sector_lba <= data_start_lba +
-                                      ({4'd0, fat_value} - 32'd2) *
-                                      {24'd0, sectors_per_cluster};
-                        state <= ST_DATA_REQ;
+                        state <= ST_ADDR_SUB;
                     end
                 end
 

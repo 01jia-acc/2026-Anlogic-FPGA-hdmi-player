@@ -145,6 +145,8 @@ wire [7:0]  debug_scan_error;
 wire        debug_source_ready;
 wire        debug_load_busy;
 wire [7:0]  debug_load_error;
+wire [4:0] debug_load_image_number;
+wire [31:0] debug_load_cluster, debug_load_size;
 wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
@@ -442,6 +444,8 @@ sd_card_bmp_fat32 #(
     .debug_source_ready(debug_source_ready),
     .debug_load_busy   (debug_load_busy),
     .debug_load_error  (debug_load_error),
+    .debug_load_image_number(debug_load_image_number),
+    .debug_load_cluster(debug_load_cluster), .debug_load_size(debug_load_size),
     .debug_scanner_state(debug_scanner_state),
     .debug_sector_lba(debug_sector_lba),
     .debug_sector_byte_count(debug_sector_byte_count),
@@ -494,6 +498,8 @@ uart_debug_logger #(
     .sd_cmd_error_latched(debug_sd_cmd_error_latched),
     .resource_valid (debug_resource_valid),
     .sector_done_count(debug_sector_done_count),
+    .load_image_number(debug_load_image_number),
+    .load_cluster(debug_load_cluster), .load_size(debug_load_size),
     .tx             (uart_txd)
 );
 
