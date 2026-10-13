@@ -43,6 +43,8 @@ module fat32_file_streamer #(
     output reg  [7:0]  fs_error,
     // 给扇区适配层的单扇区请求。
     output reg         sector_req,
+    // 请求意图先于注册的 sector_req，供共享通道先授予整扇区访问权。
+    output wire        sector_pending,
     output reg  [31:0] sector_lba,
     input  wire        sector_busy,
     input  wire        sector_valid,
@@ -105,6 +107,7 @@ module fat32_file_streamer #(
 
     // 同样的状态观察值：只要不在 IDLE，就占用底层扇区通道。
     assign file_busy = (state != ST_IDLE);
+    assign sector_pending = state == ST_DATA_REQ || state == ST_FAT_REQ;
 
     // 统一的错误收尾入口；任务展开后仍是当前 always 块中的寄存器赋值。
     task finish_with_error;

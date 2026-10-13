@@ -46,7 +46,7 @@ module sd_fat32_image_source #(
     input  wire        clk,            // 系统时钟（100MHz，来自顶层）
     input  wire        rst,            // 高有效复位
 
-    // 允许PCM读扇区；图片请求会在扇区边界暂停PCM，保留文件位置与FIFO。
+    // 允许启动/恢复PCM；让出事务入口后，读图期间仍按整扇区补充已启动的PCM。
     input wire pcm_play_enable,
     input wire pixel_clk,
     input wire pcm_ready,
@@ -157,6 +157,7 @@ module sd_fat32_image_source #(
     wire [8:0] streamer_sector_byte_index;
     wire streamer_sector_done;
     wire [7:0] streamer_sector_error;
+    wire streamer_sector_pending, audio_sector_pending;
 
     // ========================================================================
     // 内部 wire：仲裁后的共享扇区通道（接到 sd_sector_adapter）
@@ -202,7 +203,7 @@ module sd_fat32_image_source #(
     wire [7:0] audio_file_byte, audio_fs_error;
     reg audio_streamer_start;
     reg audio_running;
-    // PCM 使用独立文件流状态，BMP 加载时暂停扇区请求，保留音频簇/偏移/FIFO。
+    // PCM 使用独立文件流状态，BMP/PCM 在扇区边界交替，保留簇/偏移/FIFO。
     wire audio_channel_busy;
     reg audio_attempted, audio_start, audio_done, audio_abort;
     reg scan_usable;
@@ -232,9 +233,15 @@ module sd_fat32_image_source #(
     localparam SOURCE_ACK    = 2'd1;  // 已发 write_req，等帧写端 ack
     localparam SOURCE_STREAM = 2'd2;  // 正在流文件字节 + 输出像素
     localparam SOURCE_AUDIO = 2'd3;   // PCM文件流占用扇区通道
+    localparam CHANNEL_NONE = 2'd0, CHANNEL_BMP = 2'd1, CHANNEL_PCM = 2'd2;
+    reg [1:0] sector_owner;
+    wire audio_fault;
+    wire audio_read_allowed = audio_running && !audio_fault &&
+        (source_state == SOURCE_STREAM ||
+         (source_state == SOURCE_AUDIO && pcm_play_enable));
     assign audio_channel_busy = sector_busy || !pcm_sector_ready ||
-                                !pcm_play_enable || source_state != SOURCE_AUDIO;
-    wire audio_fault = audio_running && (pcm_overflow ||
+                                !audio_read_allowed || sector_owner != CHANNEL_PCM || scanner_scan_busy;
+    assign audio_fault = audio_running && (pcm_overflow ||
                        audio_wait_count >= PCM_SECTOR_TIMEOUT ||
                        (audio_file_done && audio_fs_error != 0));
 
@@ -245,7 +252,7 @@ module sd_fat32_image_source #(
     // source_ready = "可以接新事务"：本外壳空闲 + 扫描器不在扫（扇区通道空）。
     // 上层发 scan_start/load_start 都以它为许可条件。
     assign source_ready = (source_state == SOURCE_IDLE) && !scanner_scan_busy &&
-                          !streamer_file_busy && !sector_busy;
+                           !streamer_file_busy && !sector_busy && sector_owner == CHANNEL_NONE;
     // load_busy = 外壳不在空闲 = 加载事务（含等 ack 阶段）正在进行。
     assign load_busy = (source_state == SOURCE_ACK || source_state == SOURCE_STREAM);
     // write_req 只在 SOURCE_ACK 阶段为 1：事务开始读文件前先请求写端准备。
@@ -271,16 +278,33 @@ module sd_fat32_image_source #(
     assign debug_sd_cmd_error_latched= debug_sd_cmd_error_latched_i;
 
     // ========================================================================
-    // 扇区通道仲裁（scanner、BMP、PCM 共用通道，完整扇区后才换所有者）
+    // 扇区通道仲裁：先授予访问权，再接收注册请求，完整扇区后才换所有者。
     // ========================================================================
-    // 扫描优先；运行期间 source_state 选择 BMP 或独立的 PCM 文件流。
-    // PCM 在请求状态等待通道时不会消耗 BMP 响应；已发出的扇区必须收完。
+    // PCM FIFO 有整扇区空间时优先补充，满后把带宽让给 BMP。响应只送给所有者，
+    // 两个文件读取器可同时保持文件进度，不会把对方的音频/图片/FAT字节混入。
+    always @(posedge clk or posedge rst) begin
+        if (rst) sector_owner <= CHANNEL_NONE;
+        else if (sector_owner == CHANNEL_NONE) begin
+            if (!scanner_scan_busy && !sector_busy && !sector_done) begin
+                if (audio_read_allowed && pcm_sector_ready && audio_sector_pending)
+                    sector_owner <= CHANNEL_PCM;
+                else if (source_state == SOURCE_STREAM && streamer_sector_pending)
+                    sector_owner <= CHANNEL_BMP;
+            end
+        end else if (sector_done) sector_owner <= CHANNEL_NONE;
+        else if (!sector_busy && !audio_sector_req && !streamer_sector_req) begin
+            // 尚未发出请求时可撤销许可；已经发出的扇区保持所有者直到 done。
+            if (sector_owner == CHANNEL_PCM && (!audio_read_allowed || !pcm_sector_ready))
+                sector_owner <= CHANNEL_NONE;
+            else if (sector_owner == CHANNEL_BMP && load_abort)
+                sector_owner <= CHANNEL_NONE;
+        end
+    end
     assign sector_req = scanner_scan_busy ? scanner_sector_req :
-                        source_state == SOURCE_AUDIO ? audio_sector_req : streamer_sector_req;
+                        sector_owner == CHANNEL_PCM ? audio_sector_req :
+                        sector_owner == CHANNEL_BMP ? streamer_sector_req : 1'b0;
     assign sector_lba = scanner_scan_busy ? scanner_sector_lba :
-                        source_state == SOURCE_AUDIO ? audio_sector_lba : streamer_sector_lba;
-    // 响应侧：把共享通道的信号同时分发给各方（没被选中的一方收不到请求也
-    // 不会看这些信号，直接广播简单且安全）。
+                        sector_owner == CHANNEL_PCM ? audio_sector_lba : streamer_sector_lba;
     assign scanner_sector_busy = sector_busy;
     assign scanner_sector_valid = sector_valid;
     assign scanner_sector_byte = sector_byte;
@@ -288,11 +312,11 @@ module sd_fat32_image_source #(
     assign scanner_sector_done = sector_done;
     assign scanner_sector_error = sector_error;
     // 请求之前预留整个扇区的缓冲；一旦发出请求就必须接收全部字节。
-    assign streamer_sector_busy = sector_busy;
-    assign streamer_sector_valid = sector_valid;
+    assign streamer_sector_busy = sector_busy || sector_owner != CHANNEL_BMP || scanner_scan_busy;
+    assign streamer_sector_valid = sector_valid && sector_owner == CHANNEL_BMP && !scanner_scan_busy;
     assign streamer_sector_byte = sector_byte;
     assign streamer_sector_byte_index = sector_byte_index;
-    assign streamer_sector_done = sector_done;
+    assign streamer_sector_done = sector_done && sector_owner == CHANNEL_BMP && !scanner_scan_busy;
     assign streamer_sector_error = sector_error;
 
     // ========================================================================
@@ -441,6 +465,7 @@ module sd_fat32_image_source #(
         .fs_error             (streamer_fs_error),
         // 扇区通道（streamer 侧，经仲裁 mux 接共享通道）
         .sector_req           (streamer_sector_req),
+        .sector_pending       (streamer_sector_pending),
         .sector_lba           (streamer_sector_lba),
         .sector_busy          (streamer_sector_busy),
         .sector_valid         (streamer_sector_valid),
@@ -458,10 +483,13 @@ module sd_fat32_image_source #(
         .file_busy(audio_file_busy), .file_done(audio_file_done),
         .file_valid(audio_file_valid), .file_byte(audio_file_byte),
         .file_byte_offset(), .fs_error(audio_fs_error),
-        .sector_req(audio_sector_req), .sector_lba(audio_sector_lba),
-        .sector_busy(audio_channel_busy), .sector_valid(sector_valid),
+        .sector_req(audio_sector_req), .sector_pending(audio_sector_pending),
+        .sector_lba(audio_sector_lba),
+        .sector_busy(audio_channel_busy),
+        .sector_valid(sector_valid && sector_owner == CHANNEL_PCM && !scanner_scan_busy),
         .sector_byte(sector_byte), .sector_byte_index(sector_byte_index),
-        .sector_done(sector_done), .sector_error(sector_error)
+        .sector_done(sector_done && sector_owner == CHANNEL_PCM && !scanner_scan_busy),
+        .sector_error(sector_error)
     );
 
     // ========================================================================
@@ -542,7 +570,7 @@ module sd_fat32_image_source #(
             audio_start <= 0; audio_done <= 0; audio_abort <= 0;
             audio_streamer_start <= 0;
             if (scan_done) scan_usable <= scan_error == 0 || scan_error == 8'h22;
-            if (source_state == SOURCE_AUDIO && sector_busy && !sector_done)
+            if (sector_owner == CHANNEL_PCM && sector_busy && !sector_done)
                 audio_wait_count <= audio_wait_count + 1'b1;
             else audio_wait_count <= 0;
 
@@ -640,7 +668,8 @@ module sd_fat32_image_source #(
 
                     SOURCE_AUDIO: begin
                         // 只在当前扇区完全结束后让出通道；不清 PCM FIFO/簇链位置。
-                        if (!pcm_play_enable && !sector_busy && !audio_sector_req)
+                        if (!pcm_play_enable && !sector_busy && !audio_sector_req &&
+                            sector_owner == CHANNEL_NONE)
                             source_state <= SOURCE_IDLE;
                     end
 

@@ -7,8 +7,9 @@ module tb_pcm_file;
     always #7 pixel_clk=~pixel_clk;
     reg scan=0, allow_play=0, mode=0, image_start=0;
     wire image_done, image_write, image_commit;
+    wire [31:0] image_data;
     wire [7:0] image_error;
-    integer image_pixels=0, image_commits=0;
+    integer image_pixels=0, image_commits=0, interleaved_audio=0;
     wire scan_done, active, valid, ended, ready, underflow;
     wire signed [15:0] sample;
     wire [7:0] error;
@@ -31,7 +32,7 @@ module tb_pcm_file;
         .scan_start(scan), .scan_done(scan_done), .load_start(image_start), .load_abort(1'b0),
         .load_cluster(32'd32), .load_size(32'd921654), .write_req_ack(1'b1), .SD_MISO(1'b1),
         .load_done(image_done), .load_error(image_error),
-        .write_en(image_write), .frame_commit(image_commit)
+        .write_en(image_write), .write_data(image_data), .frame_commit(image_commit)
     );
     media_hdmi_audio_bridge #(.CLOCK_HZ(4_800_000), .PCM_ENABLE(1), .VOLUME(128)) bridge (
         .pixel_clk(pixel_clk), .rst(rst), .display_valid_sd(1'b1),
@@ -108,6 +109,8 @@ module tb_pcm_file;
         else if(dut.sd_sec_read) begin
             if(card_index!=-1) $fatal(1,"Overlapping SD requests");
             card_lba=dut.sd_sec_read_addr; card_index=0;
+            if(dut.source_state==2 && dut.sector_owner==2)
+                interleaved_audio=interleaved_audio+1;
             if(card_lba>(run_kind==8 ? 2047 : 31)) $fatal(1,"LBA out of disk");
         end else if(card_index>=0 && !(stall && card_lba==3)) begin
             if(card_index<512) begin
@@ -116,7 +119,10 @@ module tb_pcm_file;
             end else begin card_end=1; card_index=-1; end
         end
         if(!rst && dut.source_state==3 && !dut.pcm_sector_ready) blocked=blocked+1;
-        if(!rst && image_write) image_pixels=image_pixels+1;
+        if(!rst && image_write) begin
+            image_pixels=image_pixels+1;
+            if(image_data!==32'd0) $fatal(1,"PCM bytes corrupted BMP pixels");
+        end
         if(!rst && image_commit) image_commits=image_commits+1;
         if(!rst && dut.audio_file_done) begin
             file_passes=file_passes+1;
@@ -151,10 +157,22 @@ module tb_pcm_file;
             mode=1;
         end
     endtask
+    task withdraw_unissued_audio_grant;
+        begin
+            // Permission can be withdrawn after grant but before the registered
+            // request. It must remain pending, never disappear into a WAIT state.
+            wait(dut.sector_owner==2 && !dut.sector_busy && !dut.audio_sector_req);
+            @(negedge clk); allow_play=0;
+            wait(dut.source_ready);
+            if(!dut.audio_sector_pending) $fatal(1,"Unissued PCM request was lost on preemption");
+            repeat(30) @(negedge clk);
+            allow_play=1;
+        end
+    endtask
     task load_image_during_pcm;
         begin
             // Withdraw permission in the middle of a PCM SD sector. The source
-            // must finish that sector, then load BMP without resetting PCM.
+            // must finish that sector, then share BMP/PCM at sector boundaries.
             wait(dut.source_state==3 && dut.sector_busy && card_index>100);
             @(negedge clk); allow_play=0;
             wait(dut.source_ready);
@@ -165,7 +183,8 @@ module tb_pcm_file;
                 $fatal(1,"BMP preemption failed error=%h pixels=%0d commits=%0d",
                     image_error,image_pixels,image_commits);
             if(!active || ended || error!=0) $fatal(1,"PCM state lost while loading BMP");
-            if(!underflow) $fatal(1,"PCM silence during long BMP load not exercised");
+            if(underflow || interleaved_audio<2)
+                $fatal(1,"PCM was not continuously replenished during full BMP read");
             @(negedge clk); allow_play=1;
         end
     endtask
@@ -174,7 +193,7 @@ module tb_pcm_file;
         begin
             @(negedge clk); rst=1; allow_play=0; scan=0; mode=0;
             received=0; expected=want_samples; blocked=0; stall=(kind==6);
-            image_start=0; image_pixels=0; image_commits=0;
+            image_start=0; image_pixels=0; image_commits=0; interleaved_audio=0;
             loop_samples=samples; run_kind=kind; file_passes=0;
             prepare(samples,kind);
             repeat(8) @(negedge clk);
@@ -193,10 +212,11 @@ module tb_pcm_file;
                 end
                 if(samples>1000 && kind==0) begin
                     wait(received==300);
+                    withdraw_unissued_audio_grant;
                     pause_playback;
                 end
                 if(kind==0 || kind==8) begin
-                    wait(received==samples);
+                    wait(received>=samples);
                     if(!active || ended || !bridge.use_pcm)
                         $fatal(1,"Normal EOF fell back to arpeggio");
                     // Switch away after one complete playback, then return and
@@ -244,8 +264,8 @@ module tb_pcm_file;
         run_case(300,5,256,8'h25);
         run_case(300,7,556,8'h25);
         run_case(7,6,0,8'h73);
-        run_case(3102,8,9306,0);
-        $display("PASS: FAT PCM loops, fragmented chain, FIFO wrap, pause/resume across EOF, later-loop errors, invalid entries, timeout and HDMI samples");
+        run_case(3102,8,27918,0);
+        $display("PASS: FAT PCM loops, fragmented chain, FIFO wrap, pause/resume across EOF, later-loop errors, invalid entries, timeout, full BMP/PCM sector sharing without underflow and HDMI samples");
         $finish;
     end
     initial begin #100000000; $fatal(1,"PCM test timeout"); end

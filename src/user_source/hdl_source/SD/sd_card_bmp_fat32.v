@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// FAT32多图片调度：16个资源、四bank缓存、帧边界提交、按需读取。
+// FAT32多图片调度：16个资源、四bank缓存、帧边界提交、后台预读下一张。
 module sd_card_bmp_fat32 #(
     // ---- 参数：综合期常量，不占运行时硬件 ----
     // 系统时钟频率；下面的长按/超时周期数都由它换算。
@@ -117,6 +117,7 @@ module sd_card_bmp_fat32 #(
     reg [15:0] bank_image_ids;
     reg [2:0] preload_next_idx;
     reg load_is_demand;
+    reg load_is_prefetch;
     reg [1:0] victim_cursor;
     reg next_req_pending, prev_req_pending;
     reg auto_play_en;
@@ -136,7 +137,8 @@ module sd_card_bmp_fat32 #(
     wire auto_tick = auto_cnt == CLK_FREQ_HZ - 1;
     wire [3:0] next_idx = {1'b0,img_idx} + 5'd1 >= img_found_count ? 4'd0 : img_idx + 1'b1;
     wire [3:0] prev_idx = img_idx == 0 ? img_found_count - 1'b1 : img_idx - 1'b1;
-    wire [3:0] wanted_idx = next_req_pending ? next_idx : prev_idx;
+    // 没有按键请求时也查询下一张，供后台预读使用；手动请求优先。
+    wire [3:0] wanted_idx = !next_req_pending && prev_req_pending ? prev_idx : next_idx;
     reg cache_hit;
     reg [1:0] cache_bank, victim_bank;
     integer b, candidate;
@@ -160,6 +162,11 @@ module sd_card_bmp_fat32 #(
                 (!display_ack_valid || b != display_ack_bank))
                 victim_bank = b;
     end
+    wire preload_finished = preload_next_idx >= preload_limit;
+    // 仅真正需要读图时让 PCM 结束当前扇区并释放事务入口；缓存命中不暂停音频。
+    wire image_read_needed = !load_busy && !preload_halted &&
+        (!preload_finished || (display_valid && display_settled &&
+                              img_found_count > 1 && !cache_hit));
     function [4:0] resource_count;
         input [15:0] mask;
         integer i;
@@ -230,9 +237,8 @@ module sd_card_bmp_fat32 #(
         .pixel_clk(pixel_clk), .pcm_ready(pcm_ready), .pcm_sample(pcm_sample),
         .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
         .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
-        .pcm_play_enable(scan_completed && !load_busy &&
-                         !next_req_pending && !prev_req_pending &&
-                         (preload_halted || preload_next_idx >= preload_limit)),
+        .pcm_play_enable(scan_completed && !image_read_needed &&
+                         (preload_halted || preload_finished)),
         // ---- 扫描事务：顶层发脉冲，source 回报 busy/结果 ----
         .scan_start(scan_start_pulse), .scan_busy(scan_busy),
         .scan_done(scan_done), .scan_error(scan_error),
@@ -273,7 +279,7 @@ module sd_card_bmp_fat32 #(
             image_resource_valid<=0; image_clusters<=0; image_sizes<=0;
             img_found_count<=0; img_idx<=0; load_idx<=0;
             image_complete<=0; bank_image_ids<=0; preload_next_idx<=0;
-            load_is_demand<=0; victim_cursor<=0;
+            load_is_demand<=0; load_is_prefetch<=0; victim_cursor<=0;
             write_buf_idx<=0; disp_buf_idx<=0; display_valid<=0;
             next_req_pending<=0; prev_req_pending<=0;
             auto_play_en<=0; auto_cnt<=0; long_press_cnt<=0;
@@ -323,7 +329,8 @@ module sd_card_bmp_fat32 #(
                             if(load_is_demand || !display_valid) begin
                                 img_idx<=load_idx; disp_buf_idx<=write_buf_idx; display_valid<=1;
                             end
-                            if(!load_is_demand) preload_next_idx<=preload_next_idx+1'b1;
+                            if(!load_is_demand && !load_is_prefetch)
+                                preload_next_idx<=preload_next_idx+1'b1;
                             victim_cursor<=write_buf_idx+1'b1;
                         end
                     end
@@ -345,7 +352,8 @@ module sd_card_bmp_fat32 #(
                             key_auto_down_seen<=0;
                         end
                     end
-                    if(auto_play_en && display_valid && display_settled && !load_busy &&
+                    if(auto_play_en && display_valid && display_settled &&
+                       (!load_busy || load_is_prefetch) &&
                        !next_req_pending && !prev_req_pending && preload_next_idx>=preload_limit &&
                        img_found_count>1) begin
                         if(auto_tick) begin next_req_pending<=1; auto_cnt<=0; end
@@ -356,10 +364,12 @@ module sd_card_bmp_fat32 #(
                         if(source_ready) begin
                             load_idx<={1'b0,preload_next_idx};
                             write_buf_idx<=preload_next_idx[1:0];
-                            load_is_demand<=0; load_start_pulse<=1; load_busy<=1;
+                            load_is_demand<=0; load_is_prefetch<=0;
+                            load_start_pulse<=1; load_busy<=1;
                             source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                         end
-                    end else if(!load_busy && display_valid && display_settled &&
+                    end else if((!load_busy || load_is_prefetch) && preload_finished &&
+                                display_valid && display_settled &&
                                 (next_req_pending || prev_req_pending)) begin
                         if(img_found_count==1) begin
                             next_req_pending<=0; prev_req_pending<=0;
@@ -370,14 +380,24 @@ module sd_card_bmp_fat32 #(
                         end else if(preload_halted) begin
                             // 写端可能未完成错误帧，保持旧画面并停止再次使用写通道。
                             next_req_pending<=0; prev_req_pending<=0;
-                        end else if(source_ready) begin
+                        end else if(!load_busy && source_ready) begin
                             load_idx<=wanted_idx; write_buf_idx<=victim_bank;
                             image_complete[victim_bank]<=0;
-                            load_is_demand<=1; load_start_pulse<=1; load_busy<=1;
+                            load_is_demand<=1; load_is_prefetch<=0;
+                            load_start_pulse<=1; load_busy<=1;
                             source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                             if(next_req_pending) next_req_pending<=0;
                             else prev_req_pending<=0;
                         end
+                    end else if(!load_busy && preload_finished && !preload_halted &&
+                                display_valid && display_settled && img_found_count>1 &&
+                                !next_req_pending && !prev_req_pending && !cache_hit && source_ready) begin
+                        // 显示当前图片时提前读下一张；读完只发布缓存，不自动换画面。
+                        load_idx<=next_idx; write_buf_idx<=victim_bank;
+                        image_complete[victim_bank]<=0;
+                        load_is_demand<=0; load_is_prefetch<=1;
+                        load_start_pulse<=1; load_busy<=1;
+                        source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                     end
                 end
             end

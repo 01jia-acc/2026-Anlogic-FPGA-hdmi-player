@@ -12,10 +12,10 @@ module tb_multi_bmp_cache;
     wire display_valid, pix_valid, ack_valid, audio_toggle;
     wire [1:0] write_bank, display_bank, pix_bank, ack_bank;
     wire [3:0] image_id, pix_id, ack_id;
-    integer loads=0, i, saved_loads, old_id, bank;
+    integer loads=0, i, saved_loads, old_id, bank, boot_count;
     reg saved_toggle;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
-        .LOAD_TIMEOUT_MS(2000)) dut (
+        .LOAD_TIMEOUT_MS(2000), .PCM_ENABLE(1)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(1'b0),
         .key_next(key_next), .key_auto(key_auto), .key_audio_mode(1'b1),
         .bmp_width(16'd640), .bmp_height(16'd480),
@@ -38,6 +38,8 @@ module tb_multi_bmp_cache;
         loads=loads+1;
         if(pix_valid && write_bank==pix_bank)
             $fatal(1,"Writing currently displayed bank: image %0d",pix_id);
+        if(display_valid && write_bank==display_bank)
+            $fatal(1,"Writing requested display bank");
     end
     task frame;
         input integer expected;
@@ -107,7 +109,7 @@ module tb_multi_bmp_cache;
     task navigate;
         input integer expected;
         begin
-            if(dut.load_busy) finish_load(expected);
+            if(dut.load_busy && dut.load_idx==expected) finish_load(expected);
             wait(image_id==expected);
             frame(expected);
         end
@@ -121,7 +123,10 @@ module tb_multi_bmp_cache;
             repeat(3) @(negedge clk); scan_done=1;
             @(negedge clk); scan_done=0;
             finish_load(0); frame(0);
-            for(i=1;i<4;i=i+1) begin finish_load(i); frame(0); end
+            boot_count=0;
+            for(i=0;i<16;i=i+1) if(resources[i]) boot_count=boot_count+1;
+            if(boot_count>4) boot_count=4;
+            for(i=1;i<boot_count;i=i+1) begin finish_load(i); frame(0); end
         end
     endtask
     initial begin
@@ -138,38 +143,64 @@ module tb_multi_bmp_cache;
         force dut.source_load_done=source_done; force dut.source_load_error=source_error;
         boot;
         if(dut.img_found_count!=16 || loads!=4) $fatal(1,"16-resource scan/preload failed");
-        for(i=1;i<16;i=i+1) begin next_key; navigate(i); end
-        next_key; navigate(0);
-        if(loads!=17) $fatal(1,"Unexpected loads after full wrap: %0d",loads);
-        saved_loads=loads;
-        for(i=15;i>=13;i=i-1) begin auto_key(280); navigate(i); end
-        if(loads!=saved_loads) $fatal(1,"Cached previous reread the card");
-        auto_key(280); navigate(12);
-        if(loads!=saved_loads+1) $fatal(1,"Previous miss did not load");
-
-        // Rapid next: hold actual screen at 3 while requests queue and 4 loads.
-        boot;
+        // The first three cache hits must not withdraw PCM read permission.
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
-        next_key;
-        if(!dut.load_busy || pix_id!=3) $fatal(1,"Fifth image did not load in background");
-        next_key; // one pending request during this load
-        finish_load(4);
-        repeat(150) @(negedge clk);
-        if(pix_id!=3 || image_id!=4 || dut.load_busy)
-            $fatal(1,"Accepted next before actual frame acknowledgment");
+        wait(dut.load_busy);
+        if(!dut.load_is_prefetch || image_id!=3 || pix_id!=3)
+            $fatal(1,"Fifth image was not prefetched while displaying fourth");
         saved_toggle=audio_toggle;
+        finish_load(4);
+        frame(3);
+        if(image_id!=3 || audio_toggle!=saved_toggle || loads!=5)
+            $fatal(1,"Background completion changed display/audio or reread image");
+        saved_loads=loads;
+        next_key;
+        if(image_id!=4 || loads!=saved_loads || !dut.u_image_source.pcm_play_enable)
+            $fatal(1,"Prefetched cache hit reloaded or paused PCM");
+        repeat(150) @(negedge clk);
+        if(pix_id!=3 || dut.load_busy)
+            $fatal(1,"Started prefetch before actual display acknowledgment");
         frame(4);
-        if(audio_toggle==saved_toggle) $fatal(1,"Logical image did not commit audio");
-        wait(dut.load_busy); finish_load(5); frame(5);
-        if(loads!=6) $fatal(1,"Queued navigation lost or duplicated");
+        wait(dut.load_busy);
+        // Cached previous/next navigation stays responsive during background I/O.
+        auto_key(280); navigate(3);
+        if(dut.load_idx!=5 || !dut.load_busy) $fatal(1,"Cached previous interrupted prefetch");
+        next_key; navigate(4);
+        next_key; // Sixth image is still loading; keep the fifth visible.
+        repeat(100) @(negedge clk);
+        if(image_id!=4 || pix_id!=4 || !dut.next_req_pending)
+            $fatal(1,"Displayed incomplete prefetch or lost pending key");
+        finish_load(5);
+        wait(image_id==5); frame(5);
+        wait(dut.load_busy); finish_load(6);
+        if(image_id!=5) $fatal(1,"Prefetch automatically advanced picture");
+
+        // Read-ahead continues through all 16 images and the wrap to image zero.
+        boot;
+        for(i=1;i<16;i=i+1) begin
+            next_key; navigate(i);
+            if(dut.load_busy) finish_load((i+1)%16);
+        end
+        if(loads!=17) $fatal(1,"Full wrap did not prefetch image zero: %0d",loads);
+        saved_loads=loads;
+        next_key;
+        if(image_id!=0 || loads!=saved_loads) $fatal(1,"Wrapped cache hit reread card");
+        frame(0); wait(dut.load_busy); finish_load(1);
+        auto_key(280); navigate(15);
+        auto_key(280); navigate(14);
+        auto_key(280); navigate(13); // A replaced previous image loads on demand.
+        if(image_id!=13) $fatal(1,"Previous demand navigation failed");
 
         // Auto playback also crosses cache boundary and waits for each load.
         resources=16'h003f; boot;
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
         auto_key(65);
-        wait(dut.load_busy); finish_load(4); frame(4);
-        wait(dut.load_busy); finish_load(5); frame(5);
-        wait(dut.load_busy); finish_load(0); frame(0); auto_key(65);
+        wait(dut.load_busy); finish_load(4);
+        wait(image_id==4); frame(4);
+        wait(dut.load_busy); finish_load(5);
+        wait(image_id==5); frame(5);
+        wait(dut.load_busy); finish_load(0);
+        wait(image_id==0); frame(0); auto_key(65);
         if(dut.auto_play_en) $fatal(1,"Could not stop auto playback");
 
         // Sparse high-number files compact to four logical images.
@@ -180,10 +211,14 @@ module tb_multi_bmp_cache;
         for(i=1;i<=4;i=i+1) begin next_key; navigate(i%4); end
         if(loads!=4) $fatal(1,"Sparse cached navigation reloaded");
 
+        resources=16'h8000; boot;
+        next_key; frame(0);
+        if(loads!=1 || dut.load_busy) $fatal(1,"Single image unnecessarily prefetched");
+
         // A failed demand load preserves the previous display and cache safety.
         resources=16'hffff; boot;
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
-        next_key;
+        wait(dut.load_busy);
         @(negedge clk); source_error=8'h25; source_done=1;
         @(negedge clk); source_done=0;
         repeat(20) @(negedge clk);
@@ -197,12 +232,12 @@ module tb_multi_bmp_cache;
         // Hung file/write completion must time out without publishing it.
         boot;
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
-        next_key;
+        wait(dut.load_busy);
         wait(dut.preload_halted);
         if(dut.last_error!=8'he0 || image_id!=3 || dut.image_complete[write_bank])
             $fatal(1,"Timed-out demand published an incomplete cache");
         frame(3);
-        $display("PASS: 16 images, wrap, previous hit/miss, frame ack protection, queued keys, auto, sparse high slots, demand failure/timeout");
+        $display("PASS: next-image prefetch, stable background display/audio, PCM permission on hits, cached navigation during I/O, early keys, 16-image wrap, auto, sparse/single files, failure/timeout");
         $finish;
     end
     initial begin #10000000; $fatal(1,"Multi-BMP cache test timeout"); end
