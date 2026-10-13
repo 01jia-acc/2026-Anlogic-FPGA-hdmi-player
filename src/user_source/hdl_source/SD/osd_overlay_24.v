@@ -8,7 +8,7 @@ module osd_overlay_24 #(
     input wire clk,rst_n,             // video_clk 与像素域复位
     input wire vsync,de,              // 与 rgb_in 同一流水级；VS低有效，DE高有效
     input wire [23:0] rgb_in,         // 原始RGB888，R[23:16]/G[15:8]/B[7:0]
-    input wire [1:0] active_index,    // 像素域已提交的图片编号
+    input wire [3:0] active_index,    // 像素域已提交的逻辑图片编号（0～15）
     input wire auto_enabled,          // 已安全跨域的模式
     input wire [7:0] error_code,      // 已安全跨域的完整错误快照
     output wire [23:0] rgb_out,       // 完整保留非文字像素的24位精度

@@ -7,7 +7,7 @@ module status_osd_overlay #(
 )(
     input wire clk, rst_n,             // 像素时钟、低有效复位
     input wire frame_start,            // 消隐区内一拍的帧更新事件
-    input wire [1:0] active_index,      // 已提交显示 bank，0～3
+    input wire [3:0] active_index,      // 已提交逻辑图片编号，0～15
     input wire auto_enabled,           // 已同步的自动模式：1=A，0=E（讲义约定）
     input wire [7:0] error_code,        // 已同步的错误快照，00 为正常
     input wire in_de,                  // 当前输入 RGB 是否属于有效显示区域
@@ -16,7 +16,7 @@ module status_osd_overlay #(
     output reg [11:0] out_rgb,         // 笔画时黄/红，否则 in_rgb
     output wire out_de, osd_pixel      // DE 不增加延迟；osd_pixel=有效笔画命中
 );
-    reg [1:0] index_q;                 // 一帧内固定的图片编号，避免数字画到一半变化
+    reg [3:0] index_q;                 // 一帧内固定的图片编号，避免数字画到一半变化
     reg auto_q;                        // 本帧模式
     reg [7:0] error_q;                 // 本帧错误码，同时决定文字颜色
     reg hit;                           // 当前格子是否是字的一笔（不是整个文字矩形）
@@ -24,7 +24,8 @@ module status_osd_overlay #(
     reg [4:0] bits_row;                // 当前字形的一行，bit4 在左、bit0 在右
     wire [11:0] dx=pixel_x-OSD_X;      // 相对于状态条左上角的横向距离
     wire [11:0] dy=pixel_y-OSD_Y;      // 相对于状态条左上角的纵向距离
-    // dx[4:3] = dx/8，dx[2:0] = dx%8。每字占8列，前5列画字。
+    wire [4:0] image_number={1'b0,index_q}+5'd1;
+    // dx[5:3] = dx/8，dx[2:0] = dx%8。每字占8列，前5列画字。
     always @(posedge clk or negedge rst_n)
         if(!rst_n) begin index_q<=0; auto_q<=0; error_q<=0; end
         else if(frame_start) begin
@@ -63,13 +64,14 @@ module status_osd_overlay #(
     always @* begin
         // 所有组合输出先给默认值，保证不推断锁存器。
         hit=0; value=0; bits_row=0;
-        if(pixel_x>=OSD_X && pixel_x<OSD_X+32 &&
+        if(pixel_x>=OSD_X && pixel_x<OSD_X+40 &&
            pixel_y>=OSD_Y && pixel_y<OSD_Y+8) begin
-            case(dx[4:3])
-                0:value={2'b00,index_q}+1'b1; // 人看的编号从1开始，bank编号从0开始
-                1:value=auto_q ? 4'ha : 4'he;
-                2:value=error_q[7:4];
-                3:value=error_q[3:0];
+            case(dx[5:3])
+                0:value=image_number >= 10 ? 4'd1 : 4'd0;
+                1:value=image_number >= 10 ? image_number-5'd10 : image_number;
+                2:value=auto_q ? 4'ha : 4'he;
+                3:value=error_q[7:4];
+                4:value=error_q[3:0];
             endcase
             bits_row=font_row(value,dy[2:0]);
             if(dx[2:0]<5 && dy<7) hit=bits_row[4-dx[2:0]];

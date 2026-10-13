@@ -1,20 +1,8 @@
 `timescale 1ns/1ps
 
-// FAT32 卷扫描器：读取 BPB，定位根目录，并在根目录首个簇的全部扇区中
-// 查找 PIC1.BMP~PIC4.BMP。文件系统参数和文件起始簇/大小在扫描结束后保持。
-// 这里支持 MBR 分区和“直接从 LBA0 开始的 FAT32”两种常见格式。
-//
-// 阅读导航：
-//   LBA0 -> 判断“这是 FAT 引导扇区还是 MBR”
-//        -> 必要时跳到分区起始 LBA 读取 BPB
-//        -> 根据 BPB 计算 FAT 起点、数据区起点、根目录起点
-//        -> 在接收根目录扇区的同时，逐字节检查 16 个 32 字节目录项
-//        -> 保存 PIC1.BMP~PIC4.BMP 的起始簇和文件长度
-//
-// 注意：本实现是面向本工程图片资源的“小型 FAT32 读目录器”，不是完整的
-// FAT32 驱动。它只扫描根目录的第一个簇，不递归子目录，不解析长文件名，
-// 也不沿根目录的 FAT 簇链继续扩展。因此图片必须放在根目录且使用大写 8.3
-// 短文件名。本限制是硬件资源和状态机复杂度之间的明确取舍。
+// FAT32 根目录扫描器：支持 PIC1.BMP~PIC16.BMP 和可选 AUDIO.PCM。
+// 支持 MBR/无分区卷，沿根目录 FAT 簇链查找，忽略删除项、目录、卷标和长名项。
+// 资源表按文件编号排列，位 0 对应 PIC1；旧四槽输出保留用于诊断/兼容。
 module fat32_volume_scanner (
     // 扫描器自己的时钟和低有效异步复位；外部 source 用 ~rst 连接。
     input  wire        clk,
@@ -37,8 +25,10 @@ module fat32_volume_scanner (
     output reg  [31:0] data_start_lba,
     // 根据卷大小估算的最大合法簇号，用于后续防止坏链越界。
     output reg  [31:0] max_cluster,
-    // 四个资源槽是否找到对应文件；bit0~bit3 对应 PIC1~PIC4。
-    output reg  [3:0]  resource_valid,
+    // 16个资源槽是否找到对应文件；bit0~bit15 对应 PIC1~PIC16。
+    output reg  [15:0] resource_valid,
+    output reg [511:0] resource_clusters,
+    output reg [511:0] resource_sizes,
     // 四个文件的首簇。
     output reg  [31:0] resource0_cluster,
     output reg  [31:0] resource1_cluster,
@@ -90,6 +80,9 @@ module fat32_volume_scanner (
     localparam ST_ROOT_PARSE  = 4'd10;
     localparam ST_ROOT_CHECK  = 4'd11;
     localparam ST_FINISH      = 4'd12;
+    localparam ST_ROOT_FAT_REQ = 4'd13;
+    localparam ST_ROOT_FAT_WAIT = 4'd14;
+    localparam ST_ROOT_FAT_PARSE = 4'd15;
 
     // 主控制状态寄存器；case(state) 是当前扫描事务的唯一控制中心。
     reg [3:0] state;
@@ -117,9 +110,12 @@ module fat32_volume_scanner (
     // 项，且 512 能被 32 整除，所以每个目录项都不会跨扇区。
     reg [7:0] dir_first_byte;
     reg [7:0] dir_attr;
-    // bit0~bit3 分别表示当前目录项是否仍可能是 PIC1~PIC4.BMP。
+    // bit0~bit15 分别表示当前目录项是否仍可能是 PIC1~PIC16.BMP。
     // 每收到一个文件名字符，就把不匹配的候选位置 0。
-    reg [3:0] dir_name_match;
+    reg [15:0] dir_name_match;
+    integer name_slot;
+    reg [31:0] root_next_cluster;
+    reg [31:0] root_clusters_visited;
     reg dir_audio_match;
     reg directory_ended;
     reg [7:0] dir_cluster_31_24;
@@ -183,20 +179,20 @@ module fat32_volume_scanner (
     endfunction
 
     // 目录项的前 11 字节是 8 字节主名 + 3 字节扩展名；此处只接受固定的
-    // PIC1.BMP~PIC4.BMP，并故意不做字符串通配，降低硬件比较复杂度。
-    // 返回 PIC1.BMP~PIC4.BMP 在 8.3 短文件名中的第 offset 个字符。
+    // PIC1.BMP~PIC16.BMP，使用8.3短文件名逐字节比较。
+    // 返回文件名的第offset个字符，number从0开始。
     // 目录项接收时只比较当前字节，因此综合器只需要一组小比较逻辑，
     // 不再为 16 个目录项同时展开 16 组完整字符串比较器。
     function [7:0] pic_name_byte;
-        input [1:0] number;
+        input [3:0] number;
         input [3:0] offset;
         begin
             case (offset)
                 4'd0:    pic_name_byte = "P";
                 4'd1:    pic_name_byte = "I";
                 4'd2:    pic_name_byte = "C";
-                4'd3:    pic_name_byte = 8'h31 + {6'd0, number};
-                4'd4,
+                4'd3:    pic_name_byte = number < 9 ? 8'h31 + number : "1";
+                4'd4:    pic_name_byte = number < 9 ? " " : 8'h30 + (number - 9);
                 4'd5,
                 4'd6,
                 4'd7:    pic_name_byte = " ";
@@ -248,7 +244,11 @@ module fat32_volume_scanner (
             fat_start_lba      <= 32'd0;
             data_start_lba     <= 32'd0;
             max_cluster        <= 32'd0;
-            resource_valid     <= 4'd0;
+            resource_valid     <= 16'd0;
+            resource_clusters <= 0;
+            resource_sizes <= 0;
+            root_next_cluster <= 0;
+            root_clusters_visited <= 0;
             audio_resource_valid <= 1'b0;
             audio_cluster <= 0;
             audio_size <= 0;
@@ -275,7 +275,7 @@ module fat32_volume_scanner (
             root_sector_index  <= 8'd0;
             dir_first_byte     <= 8'd0;
             dir_attr           <= 8'd0;
-            dir_name_match     <= 4'd0;
+            dir_name_match     <= 16'd0;
             dir_cluster_31_24  <= 8'd0;
             dir_cluster_23_16  <= 8'd0;
             dir_cluster_15_8   <= 8'd0;
@@ -306,7 +306,10 @@ module fat32_volume_scanner (
                     // scan_start 是启动事件；清除上一轮的资源有效位和错误码。
                     if (scan_start) begin
                         fs_error <= ERR_NONE;
-                        resource_valid <= 4'd0;
+                        resource_valid <= 16'd0;
+                        resource_clusters <= 0;
+                        resource_sizes <= 0;
+                        root_clusters_visited <= 1;
                         audio_resource_valid <= 1'b0;
                         audio_cluster <= 0;
                         audio_size <= 0;
@@ -405,7 +408,7 @@ module fat32_volume_scanner (
                 end
 
                 ST_ROOT_INIT: begin
-                    // 根目录首簇位置可直接计算；本实现只读这个簇的 SPC 个扇区。
+                    // 根目录首簇位置；后续簇通过FAT项继续遍历。
                     max_cluster <= (data_sector_count >> spc_shift) + 1'b1;
                     if (root_cluster < 2 ||
                         root_cluster > ((data_sector_count >> spc_shift) + 1'b1)) begin
@@ -438,31 +441,16 @@ module fat32_volume_scanner (
                                 dir_first_byte <= sector_byte;
                                 dir_audio_match <= (sector_byte == "A");
                                 if (sector_byte == 0) directory_ended <= 1'b1;
-                                dir_name_match[0] <=
-                                    (sector_byte == pic_name_byte(2'd0, 4'd0));
-                                dir_name_match[1] <=
-                                    (sector_byte == pic_name_byte(2'd1, 4'd0));
-                                dir_name_match[2] <=
-                                    (sector_byte == pic_name_byte(2'd2, 4'd0));
-                                dir_name_match[3] <=
-                                    (sector_byte == pic_name_byte(2'd3, 4'd0));
+                                for (name_slot=0; name_slot<16; name_slot=name_slot+1)
+                                    dir_name_match[name_slot] <= (sector_byte == "P");
                             end
                             5'd1, 5'd2, 5'd3, 5'd4, 5'd5,
                             5'd6, 5'd7, 5'd8, 5'd9, 5'd10: begin
                                 if (sector_byte != audio_name_byte(sector_byte_index[3:0]))
                                     dir_audio_match <= 1'b0;
-                                if (sector_byte !=
-                                    pic_name_byte(2'd0, sector_byte_index[3:0]))
-                                    dir_name_match[0] <= 1'b0;
-                                if (sector_byte !=
-                                    pic_name_byte(2'd1, sector_byte_index[3:0]))
-                                    dir_name_match[1] <= 1'b0;
-                                if (sector_byte !=
-                                    pic_name_byte(2'd2, sector_byte_index[3:0]))
-                                    dir_name_match[2] <= 1'b0;
-                                if (sector_byte !=
-                                    pic_name_byte(2'd3, sector_byte_index[3:0]))
-                                    dir_name_match[3] <= 1'b0;
+                                for (name_slot=0; name_slot<16; name_slot=name_slot+1)
+                                    if (sector_byte != pic_name_byte(name_slot[3:0], sector_byte_index[3:0]))
+                                        dir_name_match[name_slot] <= 1'b0;
                             end
                             5'd11: dir_attr <= sector_byte;
                             5'd20: dir_cluster_23_16 <= sector_byte;
@@ -489,7 +477,17 @@ module fat32_volume_scanner (
                                                        dir_size_15_8, dir_size_7_0};
                                         audio_resource_valid <= 1'b1;
                                     end
-                                    if (dir_name_match[0]) begin
+                                    for (name_slot=0; name_slot<16; name_slot=name_slot+1) begin
+                                        if (dir_name_match[name_slot] && !resource_valid[name_slot]) begin
+                                            resource_clusters[name_slot*32 +: 32] <=
+                                                {dir_cluster_31_24, dir_cluster_23_16,
+                                                 dir_cluster_15_8, dir_cluster_7_0};
+                                            resource_sizes[name_slot*32 +: 32] <=
+                                                {sector_byte, dir_size_23_16, dir_size_15_8, dir_size_7_0};
+                                            resource_valid[name_slot] <= 1'b1;
+                                        end
+                                    end
+                                    if (dir_name_match[0] && !resource_valid[0]) begin
                                         resource0_cluster <=
                                             {dir_cluster_31_24, dir_cluster_23_16,
                                              dir_cluster_15_8, dir_cluster_7_0};
@@ -497,7 +495,7 @@ module fat32_volume_scanner (
                                             {sector_byte, dir_size_23_16,
                                              dir_size_15_8, dir_size_7_0};
                                         resource_valid[0] <= 1'b1;
-                                    end else if (dir_name_match[1]) begin
+                                    end else if (dir_name_match[1] && !resource_valid[1]) begin
                                         resource1_cluster <=
                                             {dir_cluster_31_24, dir_cluster_23_16,
                                              dir_cluster_15_8, dir_cluster_7_0};
@@ -505,7 +503,7 @@ module fat32_volume_scanner (
                                             {sector_byte, dir_size_23_16,
                                              dir_size_15_8, dir_size_7_0};
                                         resource_valid[1] <= 1'b1;
-                                    end else if (dir_name_match[2]) begin
+                                    end else if (dir_name_match[2] && !resource_valid[2]) begin
                                         resource2_cluster <=
                                             {dir_cluster_31_24, dir_cluster_23_16,
                                              dir_cluster_15_8, dir_cluster_7_0};
@@ -513,7 +511,7 @@ module fat32_volume_scanner (
                                             {sector_byte, dir_size_23_16,
                                              dir_size_15_8, dir_size_7_0};
                                         resource_valid[2] <= 1'b1;
-                                    end else if (dir_name_match[3]) begin
+                                    end else if (dir_name_match[3] && !resource_valid[3]) begin
                                         resource3_cluster <=
                                             {dir_cluster_31_24, dir_cluster_23_16,
                                              dir_cluster_15_8, dir_cluster_7_0};
@@ -540,17 +538,57 @@ module fat32_volume_scanner (
                 ST_ROOT_PARSE: begin
                     // 本状态现在只负责根目录簇内的扇区计数；目录项已经在
                     // ST_ROOT_WAIT 接收期间解析完成。
-                    if (root_sector_index + 1'b1 >= sectors_per_cluster)
+                    if (directory_ended)
                         state <= ST_ROOT_CHECK;
+                    else if (root_sector_index + 1'b1 >= sectors_per_cluster)
+                        state <= ST_ROOT_FAT_REQ;
                     else begin
                         root_sector_index <= root_sector_index + 1'b1;
                         state <= ST_ROOT_REQ;
                     end
                 end
 
+                // 根目录也沿 FAT 簇链遍历；限制 1024 簇，避免坏链循环。
+                ST_ROOT_FAT_REQ: begin
+                    if (!sector_busy) begin
+                        sector_lba <= fat_start_lba + (root_cluster >> 7);
+                        sector_req <= 1'b1;
+                        root_next_cluster <= 0;
+                        state <= ST_ROOT_FAT_WAIT;
+                    end
+                end
+                ST_ROOT_FAT_WAIT: begin
+                    if (sector_valid && sector_byte_index[8:2] == root_cluster[6:0]) begin
+                        case (sector_byte_index[1:0])
+                            0: root_next_cluster[7:0] <= sector_byte;
+                            1: root_next_cluster[15:8] <= sector_byte;
+                            2: root_next_cluster[23:16] <= sector_byte;
+                            3: root_next_cluster[31:24] <= {4'd0, sector_byte[3:0]};
+                        endcase
+                    end
+                    if (sector_done) begin
+                        if (sector_error != 0) finish_with_error(ERR_SECTOR);
+                        else state <= ST_ROOT_FAT_PARSE;
+                    end
+                end
+                ST_ROOT_FAT_PARSE: begin
+                    // 下一拍检查，兼容 FAT 项末字节与 sector_done 同拍到达。
+                    if (root_next_cluster >= 32'h0ffffff8) state <= ST_ROOT_CHECK;
+                    else if (root_next_cluster < 2 || root_next_cluster > max_cluster ||
+                             root_next_cluster == root_cluster || root_clusters_visited >= 1024)
+                        finish_with_error(8'h23);
+                    else begin
+                        root_cluster <= root_next_cluster;
+                        root_clusters_visited <= root_clusters_visited + 1'b1;
+                        root_lba <= data_start_lba + ((root_next_cluster-2) << spc_shift);
+                        root_sector_index <= 0;
+                        state <= ST_ROOT_REQ;
+                    end
+                end
+
                 ST_ROOT_CHECK: begin
-                    // 四个目标文件都找到才算资源完整；否则仍结束扫描，但保留错误码。
-                    if (resource_valid != 4'hf)
+                    // 至少一张图片即可播放；缺号由调度器跳过。
+                    if (resource_valid == 0)
                         fs_error <= ERR_RESOURCE_MISSING;
                     state <= ST_FINISH;
                 end

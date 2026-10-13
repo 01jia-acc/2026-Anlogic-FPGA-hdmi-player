@@ -5,13 +5,16 @@ module tb_pcm_file;
     reg clk=0, pixel_clk=0, rst=1;
     always #5 clk=~clk;
     always #7 pixel_clk=~pixel_clk;
-    reg scan=0, allow_play=0, mode=0;
+    reg scan=0, allow_play=0, mode=0, image_start=0;
+    wire image_done, image_write, image_commit;
+    wire [7:0] image_error;
+    integer image_pixels=0, image_commits=0;
     wire scan_done, active, valid, ended, ready, underflow;
     wire signed [15:0] sample;
     wire [7:0] error;
     wire audio_valid;
     wire [23:0] audio_left, audio_right;
-    reg [7:0] disk[0:16383];
+    reg [7:0] disk[0:1048575];
     reg [7:0] card_byte=0;
     reg card_valid=0, card_end=0;
     integer card_index=-1, card_lba=0, received=0, expected=0, scenario=0;
@@ -25,8 +28,10 @@ module tb_pcm_file;
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(ready),
         .pcm_play_enable(allow_play), .pcm_sample(sample), .pcm_valid(valid),
         .pcm_active(active), .pcm_end(ended), .pcm_underflow(underflow), .pcm_error(error),
-        .scan_start(scan), .scan_done(scan_done), .load_start(1'b0), .load_abort(1'b0),
-        .load_cluster(32'd0), .load_size(32'd0), .write_req_ack(1'b1), .SD_MISO(1'b1)
+        .scan_start(scan), .scan_done(scan_done), .load_start(image_start), .load_abort(1'b0),
+        .load_cluster(32'd32), .load_size(32'd921654), .write_req_ack(1'b1), .SD_MISO(1'b1),
+        .load_done(image_done), .load_error(image_error),
+        .write_en(image_write), .frame_commit(image_commit)
     );
     media_hdmi_audio_bridge #(.CLOCK_HZ(4_800_000), .PCM_ENABLE(1), .VOLUME(128)) bridge (
         .pixel_clk(pixel_clk), .rst(rst), .display_valid_sd(1'b1),
@@ -54,19 +59,19 @@ module tb_pcm_file;
     task prepare;
         input integer samples, kind;
         begin
-            for(i=0;i<16384;i=i+1) disk[i]=0;
+            for(i=0;i<(kind==8 ? 1048576 : 16384);i=i+1) disk[i]=0;
             disk[0]=8'heb; disk[12]=2; disk[13]=1; disk[14]=1; disk[16]=1;
-            put32(32,32); put32(36,1); put32(44,2);
+            put32(32,kind==8 ? 2048 : 32); put32(36,kind==8 ? 16 : 1); put32(44,2);
             disk[510]=8'h55; disk[511]=8'haa;
             // Four images followed by AUDIO.PCM, all in the first root cluster.
             for(i=0;i<4;i=i+1) begin
-                n=1024+i*32;
+                n=(kind==8 ? 8704 : 1024)+i*32;
                 disk[n]="P"; disk[n+1]="I"; disk[n+2]="C"; disk[n+3]="1"+i;
                 for(j=4;j<8;j=j+1) disk[n+j]=" ";
                 disk[n+8]="B"; disk[n+9]="M"; disk[n+10]="P";
                 disk[n+11]=8'h20; disk[n+26]=20+i; put32(n+28,54);
             end
-            n=1152;
+            n=(kind==8 ? 8704 : 1024)+128;
             disk[n]="A"; disk[n+1]="U"; disk[n+2]="D"; disk[n+3]="I"; disk[n+4]="O";
             disk[n+5]=" "; disk[n+6]=" "; disk[n+7]=" ";
             disk[n+8]="P"; disk[n+9]="C"; disk[n+10]="M";
@@ -78,11 +83,22 @@ module tb_pcm_file;
             for(i=0;i<13;i=i+1) begin
                 put32(512+chain[i]*4, (i+1)*256>=samples ? 32'h0fffffff : chain[i+1]);
                 for(j=0;j<256;j=j+1) begin
-                    disk[chain[i]*512+j*2]=pattern(i*256+j);
-                    disk[chain[i]*512+j*2+1]=pattern(i*256+j)>>8;
+                    disk[(chain[i]+(kind==8 ? 15 : 0))*512+j*2]=pattern(i*256+j);
+                    disk[(chain[i]+(kind==8 ? 15 : 0))*512+j*2+1]=pattern(i*256+j)>>8;
                 end
             end
             if(kind==5) put32(512+3*4,32'h0fffffff); // early chain end
+            if(kind==8) begin
+                // A full 640x480 BMP, distinct from the fragmented PCM chain.
+                put32(512+2*4,32'h0fffffff);
+                n=8704; disk[n+26]=32; put32(n+28,921654);
+                for(i=32;i<=1832;i=i+1)
+                    put32(512+i*4,i==1832 ? 32'h0fffffff : i+1);
+                n=47*512; disk[n]="B"; disk[n+1]="M";
+                put32(n+2,921654); put32(n+10,54); put32(n+14,40);
+                put32(n+18,640); put32(n+22,480);
+                disk[n+26]=1; disk[n+28]=24;
+            end
         end
     endtask
     // Response producer cannot bypass the real sector adapter.
@@ -92,7 +108,7 @@ module tb_pcm_file;
         else if(dut.sd_sec_read) begin
             if(card_index!=-1) $fatal(1,"Overlapping SD requests");
             card_lba=dut.sd_sec_read_addr; card_index=0;
-            if(card_lba>31) $fatal(1,"LBA out of disk");
+            if(card_lba>(run_kind==8 ? 2047 : 31)) $fatal(1,"LBA out of disk");
         end else if(card_index>=0 && !(stall && card_lba==3)) begin
             if(card_index<512) begin
                 card_byte=disk[card_lba*512+card_index]; card_valid=1;
@@ -100,7 +116,9 @@ module tb_pcm_file;
             end else begin card_end=1; card_index=-1; end
         end
         if(!rst && dut.source_state==3 && !dut.pcm_sector_ready) blocked=blocked+1;
-        if(!rst && dut.source_state==3 && dut.streamer_file_done) begin
+        if(!rst && image_write) image_pixels=image_pixels+1;
+        if(!rst && image_commit) image_commits=image_commits+1;
+        if(!rst && dut.audio_file_done) begin
             file_passes=file_passes+1;
             // The first pass succeeds; the next pass encounters a broken chain.
             if(run_kind==7 && file_passes==1) put32(512+3*4,32'h0fffffff);
@@ -133,11 +151,30 @@ module tb_pcm_file;
             mode=1;
         end
     endtask
+    task load_image_during_pcm;
+        begin
+            // Withdraw permission in the middle of a PCM SD sector. The source
+            // must finish that sector, then load BMP without resetting PCM.
+            wait(dut.source_state==3 && dut.sector_busy && card_index>100);
+            @(negedge clk); allow_play=0;
+            wait(dut.source_ready);
+            @(negedge clk); image_start=1;
+            @(negedge clk); image_start=0;
+            wait(image_done);
+            if(image_error!=0 || image_pixels!=307200 || image_commits!=1)
+                $fatal(1,"BMP preemption failed error=%h pixels=%0d commits=%0d",
+                    image_error,image_pixels,image_commits);
+            if(!active || ended || error!=0) $fatal(1,"PCM state lost while loading BMP");
+            if(!underflow) $fatal(1,"PCM silence during long BMP load not exercised");
+            @(negedge clk); allow_play=1;
+        end
+    endtask
     task run_case;
         input integer samples,kind,want_samples,want_error;
         begin
             @(negedge clk); rst=1; allow_play=0; scan=0; mode=0;
             received=0; expected=want_samples; blocked=0; stall=(kind==6);
+            image_start=0; image_pixels=0; image_commits=0;
             loop_samples=samples; run_kind=kind; file_passes=0;
             prepare(samples,kind);
             repeat(8) @(negedge clk);
@@ -150,11 +187,15 @@ module tb_pcm_file;
             allow_play=1;
             if(want_samples>0) begin
                 wait(active); mode=1;
+                if(kind==8) begin
+                    wait(received==300);
+                    load_image_during_pcm;
+                end
                 if(samples>1000 && kind==0) begin
                     wait(received==300);
                     pause_playback;
                 end
-                if(kind==0) begin
+                if(kind==0 || kind==8) begin
                     wait(received==samples);
                     if(!active || ended || !bridge.use_pcm)
                         $fatal(1,"Normal EOF fell back to arpeggio");
@@ -175,7 +216,7 @@ module tb_pcm_file;
             end else repeat(4000) @(negedge clk);
             if(error!==want_error) $fatal(1,"Error mismatch scenario=%0d got=%h",scenario,error);
             repeat(300) @(negedge pixel_clk);
-            if(kind!=0 || samples==0) begin
+            if((kind!=0 && kind!=8) || samples==0) begin
                 if(active || bridge.use_pcm) $fatal(1,"No fallback after error/invalid file");
                 if(kind==7 && file_passes!=2) $fatal(1,"Read error retried forever");
             end
@@ -203,8 +244,9 @@ module tb_pcm_file;
         run_case(300,5,256,8'h25);
         run_case(300,7,556,8'h25);
         run_case(7,6,0,8'h73);
+        run_case(3102,8,9306,0);
         $display("PASS: FAT PCM loops, fragmented chain, FIFO wrap, pause/resume across EOF, later-loop errors, invalid entries, timeout and HDMI samples");
         $finish;
     end
-    initial begin #30000000; $fatal(1,"PCM test timeout"); end
+    initial begin #100000000; $fatal(1,"PCM test timeout"); end
 endmodule

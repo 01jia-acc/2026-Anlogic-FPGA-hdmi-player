@@ -1,139 +1,92 @@
-import os
-import sys
-import glob
-import shutil
+"""将合规 BMP 同步为 FAT32 根目录的 PIC1.BMP～PIC16.BMP。"""
 import argparse
+from pathlib import Path
+import re
+import shutil
+import struct
+import tempfile
 
-def corrupt_old_bmp_headers(target_drive):
-    """
-    遍历目标驱动器下的所有 .bmp 文件，将其开头的 'BM' 魔数修改为 'XX'。
-    这样 FPGA 的物理扇区扫描就不会把这些“被标记为删除但物理数据还在”的文件识别为有效图片。
-    """
-    print(f"正在扫描 {target_drive} 驱动器，准备清除旧图片的 BMP 识别头...")
-    
-    # 查找根目录下的所有 bmp 文件（你也可以用 os.walk 查找所有子目录）
-    search_pattern = os.path.join(target_drive, "*.bmp")
-    bmp_files = glob.glob(search_pattern)
-    
-    corrupt_count = 0
-    for bmp_file in bmp_files:
-        try:
-            # 以读写模式打开文件（不截断）
-            with open(bmp_file, 'r+b') as f:
-                header = f.read(2)
-                if header == b'BM':
-                    # 将指针移回开头
-                    f.seek(0)
-                    # 写入随意字符破坏魔数，例如 'XX'
-                    f.write(b'XX')
-                    corrupt_count += 1
-                    print(f"  [清除有效] 已破坏头文件: {os.path.basename(bmp_file)}")
-        except Exception as e:
-            print(f"  [警告] 无法处理文件 {bmp_file}: {e}")
-            
-    print(f"头文件清除完毕，共处理了 {corrupt_count} 个旧图片文件。")
+MAX_IMAGES = 16
+MANAGED_NAME = re.compile(r"PIC(?:[1-9]|1[0-6])\.BMP", re.IGNORECASE)
 
-def clean_drive(target_drive):
-    """
-    删除目标驱动器下的所有文件，模拟格式化/清空操作（不删除隐藏系统文件夹）。
-    """
-    print(f"\n正在清空 {target_drive} 驱动器中的旧文件...")
-    for item in os.listdir(target_drive):
-        item_path = os.path.join(target_drive, item)
-        # 跳过系统隐藏文件夹如 System Volume Information
-        if item.startswith('.'):
-            continue
-            
-        try:
-            if os.path.isfile(item_path):
-                os.remove(item_path)
-            elif os.path.isdir(item_path):
-                shutil.rmtree(item_path)
-        except Exception as e:
-            print(f"  [警告] 无法删除 {item_path}: {e}")
-    print("驱动器清空完毕。")
 
-def sync_new_images(source_dir, target_drive, max_count=4):
-    """
-    从源文件夹中挑选最多 max_count 张 BMP 图片，复制到目标驱动器。
-    """
-    if not os.path.exists(source_dir):
-        print(f"\n[错误] 源文件夹不存在: {source_dir}")
-        return
+def validate_bmp(path):
+    """校验 FPGA 支持的 640×480、bottom-up、24-bit BI_RGB 文件。"""
+    with path.open("rb") as stream:
+        header = stream.read(54)
+    if len(header) < 54 or header[:2] != b"BM":
+        raise ValueError(f"{path.name}: 不是完整的 BMP 文件")
+    offset, dib_size = struct.unpack_from("<II", header, 10)
+    width, height, planes, depth, compression = struct.unpack_from("<iiHHI", header, 18)
+    if (dib_size < 40 or offset < 14 + dib_size or
+            (width, height, planes, depth, compression) != (640, 480, 1, 24, 0)):
+        raise ValueError(f"{path.name}: 需要 640×480、24 位、无压缩、正高度 BMP")
+    actual_size = path.stat().st_size
+    pixel_end = offset + 640 * 480 * 3
+    declared_size = struct.unpack_from("<I", header, 2)[0]
+    if actual_size < pixel_end:
+        raise ValueError(f"{path.name}: 像素数据不完整")
+    if declared_size != 0 and not pixel_end <= declared_size <= actual_size:
+        raise ValueError(f"{path.name}: BMP 头中的文件大小不合法")
 
-    bmp_files = glob.glob(os.path.join(source_dir, "*.bmp"))
-    if not bmp_files:
-        print(f"\n[错误] 源文件夹 {source_dir} 中没有找到任何 BMP 图片。")
-        return
 
-    # 按名称排序，保证顺序一致性
-    bmp_files.sort()
-    
-    # 限制复制的数量
-    files_to_copy = bmp_files[:max_count]
-    
-    print(f"\n准备将 {len(files_to_copy)} 张图片同步到 {target_drive}...")
-    
-    success_count = 0
-    for i, bmp_file in enumerate(files_to_copy):
-        try:
-            filename = os.path.basename(bmp_file)
-            # FAT32 版本通过根目录 8.3 短文件名定位图片，统一写成
-            # PIC1.BMP~PIC4.BMP；不要使用原来物理扫描版的 00_xxx.bmp。
-            target_name = f"PIC{i + 1}.BMP"
-            target_path = os.path.join(target_drive, target_name)
-            
-            shutil.copy2(bmp_file, target_path)
-            print(f"  [同步成功] {filename} -> {target_name}")
-            success_count += 1
-        except Exception as e:
-            print(f"  [同步失败] {filename}: {e}")
-            
-    print(f"\n同步完成！成功写入 {success_count} 张新图片。")
-    print("你现在可以安全弹出 SD 卡，插入 FPGA 开发板了。")
+def sync_new_images(source_dir, target_drive, max_count=MAX_IMAGES):
+    """只替换播放器的 PIC 文件；保留 AUDIO.PCM 和其他文件/目录。"""
+    if not 1 <= max_count <= MAX_IMAGES:
+        raise ValueError("图片数量必须在 1～16 之间")
+    source = Path(source_dir).resolve()
+    target = Path(target_drive).resolve()
+    if not source.is_dir():
+        raise ValueError(f"源目录不存在: {source}")
+    if not target.is_dir():
+        raise ValueError(f"目标目录不存在: {target}")
+    if source == target or source in target.parents or target in source.parents:
+        raise ValueError("源目录与目标目录不能相同或互相包含")
+    files = sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".bmp"),
+                   key=lambda p: p.name.casefold())[:max_count]
+    if not files:
+        raise ValueError(f"源目录中没有 BMP 图片: {source}")
+    # 校验全部待复制文件后才修改目标；不破坏旧 BMP 头，也不清空 SD 卡。
+    for image in files:
+        validate_bmp(image)
+    old_files = [p for p in target.iterdir() if MANAGED_NAME.fullmatch(p.name)]
+    desired_names = {f"PIC{i + 1}.BMP" for i in range(len(files))}
+    for p in old_files:
+        if p.name.upper() in desired_names and not p.is_file():
+            raise ValueError(f"目标名称被目录占用: {p.name}")
+    # 先完成临时副本；复制失败时原 PIC 文件不变。之后逐文件替换。
+    with tempfile.TemporaryDirectory(prefix=".bmp_sync_", dir=target) as staging:
+        staging = Path(staging)
+        for i, image in enumerate(files, 1):
+            shutil.copy2(image, staging / f"PIC{i}.BMP")
+        for i, image in enumerate(files, 1):
+            destination = target / f"PIC{i}.BMP"
+            (staging / destination.name).replace(destination)
+            print(f"[同步成功] {image.name} -> {destination.name}")
+        for old in old_files:
+            # Windows 文件名不区分大小写；其他平台清理旧的小写副本。
+            if old.is_file() and (old.name.upper() not in desired_names or
+                                  (old.name not in desired_names and
+                                   not any(old.samefile(target / name) for name in desired_names))):
+                old.unlink()
+    print(f"已同步 {len(files)} 张图片，保留 AUDIO.PCM 和其他文件。请安全弹出 SD 卡。")
+    return len(files)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="FAT32 多图片同步工具（最多16张，保留音频）")
+    parser.add_argument("drive", help="SD 卡盘符，例如 E:；也可指定已有目标目录")
+    parser.add_argument("-s", "--source", default=str(Path(__file__).resolve().parent / "output_bmp"),
+                        help="BMP 源目录，默认脚本旁的 output_bmp")
+    parser.add_argument("-n", "--num", type=int, default=MAX_IMAGES,
+                        help="最多同步的图片数，1～16，默认16")
+    args = parser.parse_args()
+    destination = args.drive + "\\" if re.fullmatch(r"[A-Za-z]:", args.drive) else args.drive
+    try:
+        sync_new_images(args.source, destination, args.num)
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"[错误] {exc}\n")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="FPGA SD卡 图片同步工具 (防物理残留死锁版)")
-    parser.add_argument('drive', help='SD 卡所在的盘符 (例如: E: 或 E:\\)')
-    parser.add_argument('-s', '--source', help='存放转换好 BMP 图片的源文件夹 (默认: 当前目录的 output_bmp)', default=None)
-    parser.add_argument('-n', '--num', type=int, default=4, help='最多同步的图片数量 (默认: 4)')
-    
-    args = parser.parse_args()
-
-    # 处理盘符格式，确保以路径分隔符结尾
-    target_drive = args.drive
-    if not target_drive.endswith(':\\') and not target_drive.endswith(':/'):
-        if target_drive.endswith(':'):
-            target_drive += '\\'
-        else:
-            target_drive += ':\\'
-
-    if not os.path.exists(target_drive):
-        print(f"[致命错误] 找不到指定的驱动器: {target_drive}")
-        print("请检查 SD 卡是否已正确插入电脑并分配了盘符。")
-        sys.exit(1)
-
-    # 确定源文件夹
-    current_dir = os.path.dirname(os.path.abspath(__name__))
-    source_dir = args.source if args.source else os.path.join(current_dir, "output_bmp")
-
-    print("="*50)
-    print(f"目标 SD 卡盘符: {target_drive}")
-    print(f"图片源文件夹  : {source_dir}")
-    print("="*50)
-    
-    # 为了防止误操作清空 C 盘，做个简单拦截
-    if target_drive.upper().startswith('C:'):
-        confirm = input("警告: 你指定了系统盘(C:)！这可能会导致系统崩溃。你确定要继续吗？(y/N): ")
-        if confirm.lower() != 'y':
-            print("操作已取消。")
-            sys.exit(0)
-
-    # 步骤 1: 破坏旧 BMP 的物理文件头
-    corrupt_old_bmp_headers(target_drive)
-    
-    # 步骤 2: 清空 SD 卡（从文件系统层面）
-    clean_drive(target_drive)
-    
-    # 步骤 3: 复制新图片
-    sync_new_images(source_dir, target_drive, max_count=args.num)
+    main()

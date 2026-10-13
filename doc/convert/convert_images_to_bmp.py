@@ -74,7 +74,7 @@ def convert_to_bmp(input_dir, output_dir, target_width=640, target_height=480):
             print(f"[失败] 转换 {filename} 时发生错误: {e}")
 
     print(f"\n转换完成！共成功转换 {success_count} 个文件。")
-    print(f"请将 '{output_dir}' 目录下的所有 BMP 文件复制到 TF(SD) 卡的根目录中。")
+    print(f"请用 sync_to_sd.py 同步 '{output_dir}'，自动命名为 PIC1.BMP～PIC16.BMP。")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FPGA TF卡 BMP 图片转换工具 (640x480, 24位无压缩)")
@@ -88,7 +88,7 @@ if __name__ == "__main__":
         convert_single_file(args.input, args.output)
     else:
         # 否则回退到默认的批量转换模式
-        current_dir = os.path.dirname(os.path.abspath(__name__))
+        current_dir = os.path.dirname(os.path.abspath(__file__))
         default_input = os.path.join(current_dir, "input_images")
         default_output = os.path.join(current_dir, "output_bmp")
 

@@ -16,7 +16,7 @@
 
 ## 音频准备
 
-TF 卡使用 FAT32，根目录放置 `PIC1.BMP`～`PIC4.BMP` 和可选的 `AUDIO.PCM`。图片格式要求不变。音频必须满足：
+TF 卡使用 FAT32，当前版本根目录可放置 `PIC1.BMP`～`PIC16.BMP` 和可选的 `AUDIO.PCM`。图片格式要求不变，见 [多图片播放](多图片播放.md)。音频必须满足：
 
 | 项目 | 要求 |
 | --- | --- |
@@ -39,23 +39,23 @@ python doc/convert/wav_to_pcm.py input.wav AUDIO.PCM
 ffmpeg -n -i input.wav -vn -ac 1 -ar 48000 -c:a pcm_s16le -f s16le AUDIO.PCM
 ```
 
-完成后将 `AUDIO.PCM` 复制到卡根目录。当前扫描器只扫描根目录的第一个簇；建议使用整理过的卡并先复制这些媒体文件，避免大量旧目录项导致文件落到后续根目录簇。文件数据本身可以分散在不同簇中，读取时跟随 FAT 链，不要求连续 LBA。
+完成后将 `AUDIO.PCM` 复制到卡根目录。当前扫描器沿根目录 FAT 链查找，最多扫描 1024 个根目录簇。文件数据本身可以分散在不同簇中，读取时跟随 FAT 链，不要求连续 LBA。
 
-已有的 `sync_to_sd.py` 会清空目标盘内容。若使用它同步图片，应先备份卡中数据、完成图片同步，再复制 `AUDIO.PCM`；不能把它当成无损追加工具。
+当前 `sync_to_sd.py` 只更新 `PIC1.BMP`～`PIC16.BMP` 并删除同步数量之外的旧 PIC 文件，保留 `AUDIO.PCM`、其他文件和目录，不再清空目标盘或破坏 BMP 文件头。
 
 ## 按键与播放行为
 
 | 板上按键及操作 | 代码端口／引脚 | 功能 |
 | --- | --- | --- |
 | KEY1 | `rst_n`／A2 | 系统复位 |
-| KEY2 按下并松开 | `key1`／B2 | 切换下一张已加载图片，按住不重复切换 |
+| KEY2 按下并松开 | `key1`／B2 | 切换下一张，未缓存图片按需加载，按住不重复切换 |
 | KEY3 短按 | `key3`／B1 | PCM／图片琶音切换，消抖约 50 ms，每次按住只触发一次，不切图 |
 | KEY4 短按并松开 | `key2`／C1 | 开关图片自动轮播 |
 | KEY4 长按约 1 秒 | `key2`／C1 | 切换上一张图片 |
 
 表中 KEY 编号按开发板实体按键标注；代码中的 `key1`、`key2` 分别对应板上 KEY2、KEY4。独立 KEY3 接线依据开发板例程的按键引脚表（A2、B2、B1、C1）。KEY2 长按不再切换音源，松开仍只切下一张。
 
-上电默认选择原有图片琶音模式；首张图片提交前仍为测试音。图片预加载完成或停止后，开始为 PCM 预取数据。短按板上 KEY3 选择 PCM 后即可播放；预加载未结束时仍保留原有声音。播放期间仍能切换已缓存的图片。
+上电默认选择原有图片琶音模式；首张图片提交前仍为测试音。前四张（不足四张则为全部）图片预加载完成或停止后，开始为 PCM 预取数据。短按板上 KEY3 选择 PCM 后即可播放；预加载未结束时仍保留原有声音。播放期间仍能切图；未缓存图片读取期间，PCM 缓冲耗尽会暂时静音，加载完成后继续原位置。
 
 从 PCM 切到琶音时暂停消耗 PCM 样本，SD 读入在缓冲达到水位后停止；切回来继续原播放位置。琶音随当前显示图片选择，重新启用时会重新开始提示音和旋律。
 
@@ -63,7 +63,7 @@ PCM 音频自动循环播放：每次正常读完 `AUDIO.PCM` 后，从文件首
 
 ## 实现与异常处理
 
-`fat32_volume_scanner` 单独记录音频首簇与大小。`sd_fat32_image_source` 在图片加载之后复用文件读取器和 SD 扇区通道，把音频字节交给 `pcm_stream_buffer`。BMP 解码器只接收图片事务的字节，不接收音频。
+`fat32_volume_scanner` 单独记录音频首簇与大小。`sd_fat32_image_source` 使用独立的 BMP 与 PCM 文件读取器，共用 SD 扇区通道，把音频字节交给 `pcm_stream_buffer`。图片需要加载时，PCM 在完整扇区边界让出通道，保留文件位置与缓冲状态；加载完继续读取。BMP 解码器只接收图片事务的字节，不接收音频。
 
 缓冲为 4096×16 bit（8 KiB），相当于约 85.3 ms 音频；256 样本预填充约 5.3 ms。一轮文件已读完时也允许开始播放，支持少于 256 个样本的短文件。双时钟读写指针带回卷位，在本时钟域生成 Gray 编码再同步。每次 SD 扇区请求之前预留完整 512 字节空间，不在扇区中途反压。正常文件结束仅重启文件读取器，保持缓冲、读写指针和 PCM 活动状态；发生错误时才发送缓冲结束信号，等缓冲和输出寄存器播空后退回琶音。
 
@@ -81,17 +81,21 @@ HDMI 桥始终保持 48 kHz 样本节拍和原有 ACR；预填充或缺数据时
 ## 验证
 
 ```powershell
+./tests/run_multi_bmp_tests.ps1
 ./tests/run_pcm_tests.ps1
 ./tests/run_integration_tests.ps1
 ./tests/run_audio_tests.ps1
 python tests/test_wav_to_pcm.py
+python tests/test_bmp_tools.py
 & 'F:/FPGA_anlu/TD5.6.2/bin/td_commands_prompt.exe' tests/build_audio_bitstream.tcl
 ```
 
 PCM 仿真使用真实扫描器、FAT 文件流、扇区适配器、异步缓冲和 HDMI 桥，只替代物理 SPI 卡响应。覆盖分散簇、缓冲回卷和反压、连续三轮播放、跨循环边界暂停续播、有符号极值、HDMI 增益和左右声道一致、最后不满扇区、1／7／256／257 样本短文件、后续一轮坏簇链停止循环、删除项、目录结束标记、卷标、空文件、奇数长度、坏簇链及读超时。原有回归同时检查四 bank 读写、图片提交与琶音同步；新增板上 KEY3 短按切换、抖动过滤、按住不重复、不切图，以及 KEY2 只切图不切音源的验证。
 
-本次构建输出放在 `tests/build/pcm_audio_release/hdmi_four_buffer_audio.bit`，同时提供便于识别的 `tests/build/pcm_audio_release/hdmi_pcm_loop.bit`。成功构建后，脚本会备份并同步工程 `Runs/phy_1` 和 `Runs/best_result` 中已有的下载 bit，避免再次下载旧单次播放版；备份保存在 `tests/build/pcm_audio_release/previous_gui_bitstreams`。仅同步下载文件，构建数据库及最终时序报告仍以 `pcm_audio_release` 目录为准。生成 bitstream 不代表已实现时序收敛或板上验证。
+本次构建输出放在 `tests/build/pcm_audio_release/hdmi_four_buffer_audio.bit`，同时提供内容一致的 `tests/build/pcm_audio_release/hdmi_pcm_loop.bit` 和 `tests/build/pcm_audio_release/hdmi_multi_bmp_audio.bit`。成功构建后，脚本会备份并同步工程 `Runs/phy_1` 和 `Runs/best_result` 中已有的下载 bit，避免再次下载旧版；备份保存在 `tests/build/pcm_audio_release/previous_gui_bitstreams`。仅同步下载文件，构建数据库及最终时序报告仍以 `pcm_audio_release` 目录为准。生成 bitstream 不代表已实现时序收敛或板上验证。
 
 2026-10-11 验证结果：上述 PCM、四 bank、琶音仿真以及转换工具测试通过；TD 综合、布局布线和 bitstream 生成成功。资源使用 LUT 9954/19600、寄存器 6536/19600、BRAM 29/64、DSP 6/29、PLL 2/4。最终 SWNS=-6.565 ns、HWNS=-1.530 ns，仍存在建立和保持时间违例，尚未时序收敛，也尚未在实际 TF 卡和 HDMI 显示器上验证。新增缓冲已被综合为 BRAM。
 
 2026-10-12 循环播放更新：PCM 三轮循环、短文件、跨循环边界暂停续播、后续一轮坏簇链、四 bank、按键及琶音仿真通过；重新完成 TD 综合、布局布线和 bitstream 生成，以上输出路径已更新为循环播放版本。资源使用 LUT 9967/19600、寄存器 6542/19600、BRAM 29/64、DSP 6/29、PLL 2/4。最终 SWNS=-6.565 ns、HWNS=-1.530 ns，仍未时序收敛，尚未上板验证。
+
+2026-10-13 多图片更新：支持最多 16 张 BMP 和四 bank 按需缓存。PCM 仿真新增读取完整 640×480 BMP 时让出 SD 通道、缓冲耗尽静音、恢复原播放位置及三轮循环的验证，与多图片、原有集成、音频及转换工具回归均通过。重新生成下载位流，资源 LUT 12062/19600、寄存器 8419/19600、BRAM 29/64、DSP 10/29、PLL 2/4；最终 SWNS=-6.565 ns、HWNS=-1.540 ns，仍未时序收敛。多图片版本尚未上板验证。

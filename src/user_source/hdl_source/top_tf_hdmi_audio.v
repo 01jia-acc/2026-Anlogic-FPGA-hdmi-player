@@ -184,6 +184,9 @@ reg         frame_write_toggle_mem;   // 【top 输出→sd_card_bmp】跨域的
 wire [1:0]  write_buf_idx;            // 【sd_card_bmp 输出→frame_read_write】写缓冲区编号
 wire [1:0]  disp_buf_idx;             // 【sd_card_bmp 输出】期望显示的缓冲区编号
 wire [1:0]  video_disp_buf_idx;       // 视频帧请求边界锁存的实际读取缓冲区
+wire [3:0] display_image_id, video_image_id, display_ack_image_id;
+wire [1:0] display_ack_bank;
+wire display_ack_valid;
 wire        video_display_valid;
 wire        display_commit_toggle;
 reg         video_read_req_d;
@@ -330,11 +333,15 @@ end
 media_display_commit u_display_commit (
     .src_clk(sd_card_clk), .rst(rst_all),
     .display_valid_src(display_valid), .display_index_src(disp_buf_idx),
+    .display_image_id_src(display_image_id),
     .pixel_clk(video_clk),
     .frame_request(video_read_req && !video_read_req_d),
     .reader_frame_start(reader_frame_start),
     .display_valid_pix(video_display_valid),
     .display_index_pix(video_disp_buf_idx),
+    .display_image_id_pix(video_image_id),
+    .display_ack_valid_src(display_ack_valid), .display_ack_bank_src(display_ack_bank),
+    .display_ack_image_id_src(display_ack_image_id),
     .audio_commit_toggle(display_commit_toggle)
 );
 
@@ -394,7 +401,7 @@ sd_card_bmp_fat32 #(
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
     .SCAN_START_SECTOR (32'd0),       // 参数：从扇区 0 开始扫描
     .SCAN_MAX_SECTOR   (32'd131071),  // 参数：最多扫描到的扇区
-    .SCAN_TARGET_COUNT (3'd4)         // 参数：最多记录 4 张 BMP
+    .SCAN_TARGET_COUNT (3'd4)         // 旧接口兼容参数；FAT32版固定支持16个资源
 ) sd_card_bmp_fat32_m0(
     .pixel_clk(video_clk), .pcm_ready(pcm_stream_ready), .pcm_sample(pcm_stream_sample),
     .pcm_valid(pcm_stream_valid), .pcm_active(pcm_stream_active),
@@ -410,6 +417,9 @@ sd_card_bmp_fat32 #(
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
     .bmp_height        (16'd480),              // 输入：要求 BMP 高度为 480
     .display_valid     (display_valid),        // 输出→top：首帧提交后允许显示
+    .display_image_id(display_image_id),
+    .display_ack_valid(display_ack_valid), .display_ack_bank(display_ack_bank),
+    .display_ack_image_id(display_ack_image_id),
 
     .write_finish_toggle(frame_write_toggle_mem), // 输入：SDRAM 写帧完成事件
     .write_buf_idx     (write_buf_idx),         // 输出→frame_read_write：写缓冲区编号
@@ -631,7 +641,7 @@ subtitle_frame_commit u_osd_mem_commit (
 );
 osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(vout_data),
-    .active_index(video_disp_buf_idx), .auto_enabled(osd_sd_snapshot[8]),
+    .active_index(video_image_id), .auto_enabled(osd_sd_snapshot[8]),
     .error_code(osd_error), .rgb_out(osd_rgb), .de_out(osd_de),
     .osd_active(), .frame_start(osd_frame_start),
     .pixel_x_out(osd_x), .pixel_y_out(osd_y)
@@ -848,7 +858,7 @@ media_hdmi_audio_bridge #(
     .pcm_mode_sd(pcm_mode),
     .stream_sample(pcm_stream_sample), .pcm_ready(pcm_stream_ready),
     .pixel_clk(video_clk), .rst(rst_all),
-    .display_valid_sd(video_display_valid), .media_id_sd(video_disp_buf_idx),
+    .display_valid_sd(video_display_valid), .media_id_sd(video_image_id[1:0]),
     .commit_toggle_sd(display_commit_toggle),
     .audio_valid(audio_valid), .audio_left_data(audio_left_data),
     .audio_right_data(audio_right_data), .acr_valid(acr_valid),

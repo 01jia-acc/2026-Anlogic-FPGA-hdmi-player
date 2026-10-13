@@ -8,10 +8,13 @@ module tb_four_buffer_audio;
     always #20 pix_clk=~pix_clk;
     reg key_next=1, key_auto=1, key_audio_mode=1, frame_req=0, write_toggle=0;
     reg scan_done=0, source_done=0;
-    reg [3:0] resources=4'b1111;
+    reg [15:0] resources=16'h000f;
     reg [7:0] source_error=0;
     wire display_valid, pix_valid, read_start, audio_toggle;
     wire [1:0] write_bank, display_bank, pix_bank;
+    wire [3:0] image_id, pix_image_id, ack_image_id;
+    wire [1:0] ack_bank;
+    wire ack_valid;
     wire [3:0] state_code;
     wire audio_valid;
     wire [23:0] audio_left;
@@ -23,6 +26,8 @@ module tb_four_buffer_audio;
         .pixel_clk(pix_clk), .pcm_ready(1'b0),
         .bmp_width(16'd640), .bmp_height(16'd480),
         .display_valid(display_valid), .state_code(state_code),
+        .display_image_id(image_id), .display_ack_valid(ack_valid),
+        .display_ack_bank(ack_bank), .display_ack_image_id(ack_image_id),
         .write_finish_toggle(write_toggle), .write_buf_idx(write_bank),
         .disp_buf_idx(display_bank), .write_req(), .write_req_ack(1'b1),
         .write_en(), .write_data(), .write_frame_commit(),
@@ -31,6 +36,9 @@ module tb_four_buffer_audio;
     media_display_commit commit (
         .src_clk(sd_clk), .rst(rst), .display_valid_src(display_valid),
         .display_index_src(display_bank), .pixel_clk(pix_clk),
+        .display_image_id_src(image_id), .display_image_id_pix(pix_image_id),
+        .display_ack_valid_src(ack_valid), .display_ack_bank_src(ack_bank),
+        .display_ack_image_id_src(ack_image_id),
         .frame_request(frame_req), .reader_frame_start(read_start),
         .display_valid_pix(pix_valid), .display_index_pix(pix_bank),
         .audio_commit_toggle(audio_toggle)
@@ -183,7 +191,8 @@ module tb_four_buffer_audio;
         key_next=1;
         repeat(65) @(negedge sd_clk);
         if(control.pcm_mode || display_bank!=1) $fatal(1,"KEY2 release did not advance once");
-        for(i=2;i<=4;i=i+1) next_key;
+        frame(1);
+        for(i=2;i<=4;i=i+1) begin next_key; frame(i%4); end
         frame(0);
         for(i=1;i<=4;i=i+1) begin
             next_key;
