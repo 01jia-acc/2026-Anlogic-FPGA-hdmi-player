@@ -151,9 +151,13 @@ wire        debug_load_busy;
 wire [7:0]  debug_load_error;
 wire [4:0] debug_load_image_number;
 wire [31:0] debug_load_cluster, debug_load_size;
+wire [63:0] debug_load_pipeline;
 wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
+wire zoom_mode_sd;
+wire [1:0] zoom_level_sd, display_zoom_level;
+wire [95:0] osd_sd_snapshot; // [11]=zoom mode, [10:9]=zoom level
 wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
 wire [3:0]  debug_scanner_state;
@@ -433,6 +437,7 @@ sd_card_bmp_fat32 #(
     .bmp_height        (16'd480),              // 输入：要求 BMP 高度为 480
     .display_valid     (display_valid),        // 输出→top：首帧提交后允许显示
     .display_image_id(display_image_id),
+    .zoom_mode(zoom_mode_sd), .zoom_level(zoom_level_sd),
     .display_ack_valid(display_ack_valid), .display_ack_bank(display_ack_bank),
     .display_ack_image_id(display_ack_image_id),
 
@@ -467,7 +472,8 @@ sd_card_bmp_fat32 #(
     .debug_resource_valid(debug_resource_valid),
     .debug_sd_state(debug_sd_state),
     .debug_sd_cmd_error(debug_sd_cmd_error),
-    .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched)
+    .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched),
+    .debug_load_pipeline(debug_load_pipeline)
  );
 
 // ============================================================================
@@ -513,6 +519,7 @@ uart_debug_logger #(
     .sector_done_count(debug_sector_done_count),
     .load_image_number(debug_load_image_number),
     .load_cluster(debug_load_cluster), .load_size(debug_load_size),
+    .load_pipeline(debug_load_pipeline),
     .tx             (uart_txd)
 );
 
@@ -573,7 +580,8 @@ media_frame_reader #(
     .BURST_SIZE          (128),
     .BURST_GAP_CYCLES    (12),
     .MAX_INFLIGHT_BURSTS (2),
-    .REGION_READ_ENABLE (TRANSITION_MODE == 2)
+    .REGION_READ_ENABLE (TRANSITION_MODE == 2),
+    .ZOOM_ENABLE(1), .FRAME_WIDTH(640), .FRAME_HEIGHT(480)
 ) u_media_frame_reader (
     .mem_clk             (ext_mem_clk),
     .mem_rst_n           (~rst_all),
@@ -591,6 +599,8 @@ media_frame_reader #(
     .active_index        (video_disp_buf_idx),
     .old_index           (video_old_buf_idx),
     .new_words           (video_new_words),
+    .zoom_level(video_display_changed ? 2'd1 : osd_sd_snapshot[10:9]),
+    .display_zoom_level(display_zoom_level),
     .pixel_consume       (reader_pixel_consume),
     .pixel_rgb           (reader_pixel_rgb),
     .pixel_valid         (reader_pixel_valid),
@@ -632,13 +642,13 @@ assign vout_data = video_display_valid ? vout_data_raw : 24'd0;
 
 // OSD只替换最终像素颜色，不改SDRAM/FIFO协议。
 wire osd_sd_ready, osd_mem_ready; // 两个源时钟域各自的邮箱空闲反馈
-wire [95:0] osd_sd_snapshot;      // [8]=模式，[7:0]=SD/写侧错误
 wire [95:0] osd_mem_snapshot;     // [7:0]=读侧错误
 wire [23:0] osd_rgb;             // 叠字后的完整RGB888
 wire osd_de;                     // DE透传，与输出颜色同拍
 wire osd_frame_start;
 wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
+wire [23:0] zoom_rgb;
 wire [23:0] transition_rgb;
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
@@ -651,7 +661,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({87'd0,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({84'd0,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -700,6 +710,11 @@ timestamp_osd #(.CLOCK_FREQ_HZ(25_000_000)) u_timestamp_osd (
     .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
     .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
     .rgb_in(osd_rgb), .rgb_out(timestamp_rgb)
+);
+zoom_status_osd u_zoom_status (
+    .clk(video_clk), .rst_n(~rst_all), .de(osd_de),
+    .pixel_x(osd_x), .pixel_y(osd_y), .zoom_mode(osd_sd_snapshot[11]),
+    .zoom_level(display_zoom_level), .rgb_in(timestamp_rgb), .rgb_out(zoom_rgb)
 );
 
 // ============================================================================
@@ -878,7 +893,7 @@ video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_rst         (rst_all),         // 输入：统一高有效复位
     .I_vs          (vs),              // 输入：延迟后的场同步
     .I_de          (osd_de),          // OSD不增加流水拍数
-    .I_rgb         (timestamp_rgb),   // 状态条与运行时长叠加后的RGB888
+    .I_rgb         (zoom_rgb),   // 状态条、运行时长和缩放状态叠加后的RGB888
     .O_video_user  (axis_s_user),     // 输出→HDMI IP：帧起始/用户标志
     .O_video_valid (axis_s_valid),    // 输出→HDMI IP：AXIS 数据有效
     .O_video_last  (axis_s_last),     // 输出→HDMI IP：数据包/行结束标志

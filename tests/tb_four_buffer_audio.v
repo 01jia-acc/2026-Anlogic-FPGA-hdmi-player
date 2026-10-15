@@ -172,19 +172,42 @@ module tb_four_buffer_audio;
         if(control.pcm_mode) $fatal(1,"KEY3 bounce switched audio mode");
         @(negedge sd_clk); key_audio_mode=0;
         repeat(65) @(negedge sd_clk);
-        if(!control.pcm_mode || display_bank!=0 || control.auto_play_en)
-            $fatal(1,"Short KEY3 did not switch only the audio mode");
+        if(control.pcm_mode) $fatal(1,"KEY3 switched before release");
         key_audio_mode=1;
         repeat(65) @(negedge sd_clk);
         if(!control.pcm_mode || display_bank!=0) $fatal(1,"KEY3 release changed mode/image");
-        // A second press switches back; holding it must not repeat.
+        // A second short press switches back on release.
         @(negedge sd_clk); key_audio_mode=0;
         repeat(65) @(negedge sd_clk);
-        if(control.pcm_mode) $fatal(1,"Second KEY3 press did not switch back");
-        repeat(600) @(negedge sd_clk);
-        if(control.pcm_mode || display_bank!=0) $fatal(1,"Held KEY3 repeated or changed image");
         key_audio_mode=1;
         repeat(65) @(negedge sd_clk);
+        if(control.pcm_mode) $fatal(1,"Second KEY3 release did not switch back");
+        // Long KEY3 enters zoom exactly once and does not change audio.
+        key_audio_mode=0;
+        repeat(650) @(negedge sd_clk);
+        if(!control.zoom_mode || control.pcm_mode) $fatal(1,"Long KEY3 did not enter zoom once");
+        key_audio_mode=1;
+        repeat(65) @(negedge sd_clk);
+        next_key;
+        if(control.zoom_level!=2 || display_bank!=0) $fatal(1,"Zoom in 1.5x failed");
+        next_key; next_key;
+        if(control.zoom_level!=3 || display_bank!=0) $fatal(1,"Zoom maximum failed");
+        auto_key(65); auto_key(280); auto_key(65); auto_key(65);
+        if(control.zoom_level!=0 || display_bank!=0 || control.auto_play_en)
+            $fatal(1,"Zoom shrink/minimum/navigation isolation failed");
+        // Automatic playback retains its setting but its timer pauses.
+        force control.auto_play_en=1'b1;
+        repeat(5200) @(negedge sd_clk);
+        if(display_bank!=0 || control.auto_cnt!=0) $fatal(1,"Zoom did not pause autoplay");
+        release control.auto_play_en;
+        key_audio_mode=0;
+        repeat(280) @(negedge sd_clk);
+        key_audio_mode=1;
+        repeat(65) @(negedge sd_clk);
+        if(control.zoom_mode || !control.auto_play_en || control.pcm_mode)
+            $fatal(1,"Zoom exit/autoplay setting failed");
+        auto_key(65);
+        if(control.auto_play_en) $fatal(1,"Cannot stop resumed autoplay");
         // Board KEY2 long hold no longer changes audio; release advances once.
         @(negedge sd_clk); key_next=0;
         repeat(600) @(negedge sd_clk);
@@ -193,6 +216,7 @@ module tb_four_buffer_audio;
         repeat(65) @(negedge sd_clk);
         if(control.pcm_mode || display_bank!=1) $fatal(1,"KEY2 release did not advance once");
         frame(1);
+        if(control.zoom_level!=1) $fatal(1,"New image did not reset zoom");
         for(i=2;i<=4;i=i+1) begin next_key; frame(i%4); end
         frame(0);
         for(i=1;i<=4;i=i+1) begin

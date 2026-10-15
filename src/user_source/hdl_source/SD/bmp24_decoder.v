@@ -11,7 +11,10 @@
 // 让文件在 SD 上是否连续不再影响 BMP 解码，也让显示链路不必理解 FAT 簇链。
 module bmp24_decoder #(
     parameter integer EXPECTED_WIDTH  = 640,
-    parameter integer EXPECTED_HEIGHT = 480
+    parameter integer EXPECTED_HEIGHT = 480,
+    parameter integer ALLOW_RESIZE = 0,
+    parameter integer MAX_WIDTH = 1920,
+    parameter integer MAX_HEIGHT = 1080
 ) (
     // 文件流与解码器使用同一个时钟域，复位低有效。
     input  wire        clk,
@@ -48,7 +51,9 @@ module bmp24_decoder #(
     // 文件头给出的像素数据起始偏移。
     output reg  [31:0] pixel_offset,
     // 每行字节数，包含 4 字节对齐填充。
-    output reg  [31:0] row_stride
+    output reg  [31:0] row_stride,
+    output wire [15:0] image_width,
+    output wire [15:0] image_height
 );
     // 错误码：31~36 表示 BMP 自身格式问题，37/38 表示数据不完整或上游失败。
     localparam ERR_NONE        = 8'h00;
@@ -61,10 +66,9 @@ module bmp24_decoder #(
     localparam ERR_TRUNCATED   = 8'h37;
     localparam ERR_UPSTREAM    = 8'h38;
 
-    // 24 位 BMP 每像素 3 字节，但每行必须按 4 字节对齐；640*3=1920 已对齐。
-    localparam integer ROW_BYTES = ((EXPECTED_WIDTH * 3 + 3) / 4) * 4;
-    // 完整像素区应有的字节数（不含 54 字节头）。
-    localparam integer IMAGE_BYTES = ROW_BYTES * EXPECTED_HEIGHT;
+    localparam integer SIZE_W = $clog2((MAX_WIDTH > EXPECTED_WIDTH ? MAX_WIDTH : EXPECTED_WIDTH)+1);
+    localparam integer SIZE_H = $clog2((MAX_HEIGHT > EXPECTED_HEIGHT ? MAX_HEIGHT : EXPECTED_HEIGHT)+1);
+    localparam integer STRIDE_W = SIZE_W+2;
 
     // 54 字节 BMP 文件头 + BITMAPINFOHEADER 的缓存；磁盘小端字段通过 le16/le32 读取。
     reg [7:0] header [0:53];
@@ -90,6 +94,11 @@ module bmp24_decoder #(
     reg [15:0] planes;
     reg [15:0] bits_per_pixel;
     reg [31:0] compression;
+    assign image_width = parsed_width[15:0];
+    assign image_height = parsed_height[15:0];
+    wire [31:0] header_width = {header[21],header[20],header[19],header[18]};
+    wire [31:0] header_height = {header[25],header[24],header[23],header[22]};
+    reg [31:0] header_stride, header_image_bytes, expected_pixels;
 
     integer i;
 
@@ -138,6 +147,7 @@ module bmp24_decoder #(
             planes          <= 16'd0;
             bits_per_pixel  <= 16'd0;
             compression     <= 32'd0;
+            header_stride<=0; header_image_bytes<=0; expected_pixels<=0;
             for (i = 0; i < 54; i = i + 1)
                 header[i] <= 8'd0;
         end else if (file_abort) begin
@@ -178,12 +188,22 @@ module bmp24_decoder #(
                 planes          <= 16'd0;
                 bits_per_pixel  <= 16'd0;
                 compression     <= 32'd0;
+                header_stride<=0; header_image_bytes<=0; expected_pixels<=0;
             end
 
             // 头部字节按文件偏移写入缓存。因为 file_byte_offset 与 valid 同拍，
             // 不要求文件在扇区边界对齐。
             if (file_valid && file_byte_offset < 54)
                 header[file_byte_offset] <= file_byte;
+
+            // Stage dimension arithmetic well before byte 53 validation.
+            // Bounded multipliers avoid a 32x32 multiply/add validation path.
+            if(file_valid && file_byte_offset==26)
+                header_stride <= ((header_width*3+3)>>2)<<2;
+            if(file_valid && file_byte_offset==30) begin
+                header_image_bytes <= header_stride[STRIDE_W-1:0] * header_height[SIZE_H-1:0];
+                expected_pixels <= header_width[SIZE_W-1:0] * header_height[SIZE_H-1:0];
+            end
 
             // Offset 53 is the first cycle at which all fields needed for
             // validation have already been captured in the header array.
@@ -200,8 +220,10 @@ module bmp24_decoder #(
                 if (header[0] != "B" || header[1] != "M") begin
                     bmp_error <= ERR_SIGNATURE;
                 end else if (le32(14) < 40 ||
-                             le32(18) != EXPECTED_WIDTH ||
-                             le32(22) != EXPECTED_HEIGHT) begin
+                             (ALLOW_RESIZE ?
+                              (header_width == 0 || header_width > MAX_WIDTH ||
+                               header_height == 0 || header_height > MAX_HEIGHT) :
+                              (header_width != EXPECTED_WIDTH || header_height != EXPECTED_HEIGHT))) begin
                     bmp_error <= ERR_DIMENSIONS;
                 end else if (le16(26) != 16'd1) begin
                     bmp_error <= ERR_PLANES;
@@ -211,17 +233,17 @@ module bmp24_decoder #(
                     bmp_error <= ERR_COMPRESSION;
                 end else if (le32(10) < 54 || le32(10) >= file_size) begin
                     bmp_error <= ERR_OFFSET;
-                end else if (le32(10) + IMAGE_BYTES > file_size ||
+                end else if (header_image_bytes > file_size - le32(10) ||
                              (le32(2) != 0 &&
                               (le32(2) > file_size ||
-                               le32(2) < le32(10) + IMAGE_BYTES))) begin
+                               le32(2) < le32(10) + header_image_bytes))) begin
                     bmp_error <= ERR_TRUNCATED;
                 end else begin
                     header_accepted <= 1'b1;
                     decode_enabled  <= 1'b1;
                     top_down        <= (le32(22) & 32'h80000000) != 0;
                     pixel_offset    <= le32(10);
-                    row_stride      <= ROW_BYTES;
+                    row_stride      <= header_stride;
                 end
             end
 
@@ -229,10 +251,10 @@ module bmp24_decoder #(
             // 第三个字节（R）到达的周期产生 pixel_valid。
             if (file_valid && decode_enabled &&
                 file_byte_offset >= pixel_offset &&
-                physical_row < EXPECTED_HEIGHT) begin
-                // 行前 EXPECTED_WIDTH*3 字节是 BGR 像素；其后的字节是 padding，
+                physical_row < parsed_height) begin
+                // 行前 parsed_width*3 字节是 BGR 像素；其后的字节是 padding，
                 // 只推进行计数，不产生像素。
-                if (byte_in_row < EXPECTED_WIDTH * 3) begin
+                if (byte_in_row < parsed_width * 3) begin
                     case (channel_phase)
                         2'd0: begin
                             blue_hold <= file_byte;
@@ -246,7 +268,7 @@ module bmp24_decoder #(
                             pixel_valid <= 1'b1;
                             pixel_rgb <= {file_byte, green_hold, blue_hold};
                             pixel_x <= x_count;
-                            // frame_fifo_write performs the project-wide
+                            // media_frame_loader performs the project-wide
                             // vertical flip, so keep file order here.
                             pixel_y <= physical_row[15:0];
                             pixels_received <= pixels_received + 1'b1;
@@ -274,7 +296,7 @@ module bmp24_decoder #(
                 if (upstream_error != ERR_NONE)
                     bmp_error <= ERR_UPSTREAM;
                 else if (bmp_error == ERR_NONE && header_accepted &&
-                         pixels_received == EXPECTED_WIDTH * EXPECTED_HEIGHT)
+                         pixels_received == expected_pixels)
                     frame_commit <= 1'b1;
                 else if (bmp_error == ERR_NONE)
                     bmp_error <= ERR_TRUNCATED;

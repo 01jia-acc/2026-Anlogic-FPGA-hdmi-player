@@ -23,6 +23,8 @@ module sd_card_bmp_fat32 #(
     output wire pcm_valid, pcm_active, pcm_end, pcm_underflow,
     output wire [7:0] pcm_error,
     output reg pcm_mode,
+    output reg zoom_mode,
+    output reg [1:0] zoom_level, // 0=0.5x, 1=1x, 2=1.5x, 3=2x
 
     // ===================== 端口：按键（低有效原始输入，内部会同步+去抖） =====================
     input  wire        key_next,       // "下一张"按键
@@ -90,7 +92,8 @@ module sd_card_bmp_fat32 #(
     output wire [3:0]  debug_resource_valid,
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
-    output wire        debug_sd_cmd_error_latched
+    output wire        debug_sd_cmd_error_latched,
+    output wire [63:0] debug_load_pipeline
 );
 
     // 最多16个目录资源，四个bank只作缓存。文件完成与SDRAM写完同时满足才提交。
@@ -108,6 +111,9 @@ module sd_card_bmp_fat32 #(
     wire [15:0] source_debug_sector_done_count;
     wire [4:0] source_debug_sd_state;
     wire source_debug_sd_cmd_error, source_debug_sd_cmd_error_latched;
+    wire [63:0] source_debug_load_pipeline;
+    reg [63:0] aborted_load_pipeline;
+    reg pipeline_frozen;
     reg scan_start_pulse, load_start_pulse, load_abort_pulse;
     reg scan_kicked, scan_completed, preload_halted;
     reg [15:0] image_resource_valid;
@@ -128,13 +134,32 @@ module sd_card_bmp_fat32 #(
     reg key_auto_down_seen, long_press_marked, next_down_seen, next_release_pulse;
     reg load_busy, source_done_seen, write_done_seen;
     reg [1:0] load_prepare;
+    localparam integer LOAD_TIMEOUT_CYCLES = (CLK_FREQ_HZ / 1000) * LOAD_TIMEOUT_MS;
+    wire [63:0] live_load_pipeline = {source_debug_load_pipeline[63:48],
+        source_done_seen, write_done_seen, load_prepare, load_busy,
+        source_debug_load_pipeline[42:0]};
+    assign debug_load_pipeline = pipeline_frozen ? aborted_load_pipeline : live_load_pipeline;
+    wire pipeline_timeout = load_busy && load_prepare==0 &&
+        !(source_load_done && source_load_error!=0) && load_timeout_cnt>=LOAD_TIMEOUT_CYCLES;
+    // Capture at the timeout decision, before the scheduler clears its flags
+    // and before the registered abort pulse resets the source on the next edge.
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin pipeline_frozen<=0; aborted_load_pipeline<=0; end
+        else if(load_start_pulse) pipeline_frozen<=0;
+        else if(pipeline_timeout) begin
+            pipeline_frozen<=1; aborted_load_pipeline<=live_load_pipeline;
+        end
+    end
     reg [3:0] lookup_slot, lookup_image;
     reg [31:0] load_cluster_lut, load_size_lut;
     reg [2:0] wrfin_tgl_sync;
     reg [7:0] last_error;
     wire key_next_press, key_next_stable, key_auto_press, key_auto_stable, key_audio_mode_press;
+    wire key_audio_stable;
+    reg audio_down_seen, audio_long_marked, zoom_auto_down;
+    reg [31:0] audio_hold_count;
+    reg [3:0] zoom_image_id;
     localparam integer LONG_PRESS_CYCLES = (CLK_FREQ_HZ / 1000) * LONG_PRESS_MS;
-    localparam integer LOAD_TIMEOUT_CYCLES = (CLK_FREQ_HZ / 1000) * LOAD_TIMEOUT_MS;
     wire [2:0] preload_limit = img_found_count > 4 ? 3'd4 : img_found_count[2:0];
     wire write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
     // 双向邮箱确认像素域已切到所请求的帧之后，才允许复用旧显示bank。
@@ -216,16 +241,44 @@ module sd_card_bmp_fat32 #(
         .button_stable_out(key_auto_stable));
     key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_key_audio_mode (
         .clk(clk),.rst(rst),.button_in(key_audio_mode),.press_pulse(key_audio_mode_press),
-        .button_stable_out());
+        .button_stable_out(key_audio_stable));
     always @(posedge clk or posedge rst) begin
-        if(rst) begin pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0; end
+        if(rst) begin
+            pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0;
+            zoom_mode<=0; zoom_level<=1; zoom_image_id<=0;
+            audio_down_seen<=0; audio_long_marked<=0; audio_hold_count<=0;
+            zoom_auto_down<=0;
+        end
         else begin
             next_release_pulse<=0;
-            if(PCM_ENABLE && key_audio_mode_press) pcm_mode<=~pcm_mode;
+            // Defer short KEY3 action until release: a long press must not
+            // switch the audio source on its way into/out of zoom mode.
+            if(key_audio_mode_press) audio_down_seen<=1;
+            if(!key_audio_stable) begin
+                if(audio_hold_count<LONG_PRESS_CYCLES-1) audio_hold_count<=audio_hold_count+1'b1;
+                else if(!audio_long_marked) begin
+                    audio_long_marked<=1;
+                    if(display_valid && display_settled) zoom_mode<=~zoom_mode;
+                end
+            end else begin
+                audio_hold_count<=0; audio_long_marked<=0;
+                if(audio_down_seen) begin
+                    audio_down_seen<=0;
+                    if(!audio_long_marked && PCM_ENABLE) pcm_mode<=~pcm_mode;
+                end
+            end
             if(key_next_press) next_down_seen<=1;
             if(key_next_stable && next_down_seen) begin
-                next_release_pulse<=1; next_down_seen<=0;
+                next_down_seen<=0;
+                if(zoom_mode) begin if(zoom_level<3) zoom_level<=zoom_level+1'b1; end
+                else next_release_pulse<=1;
             end
+            if(key_auto_press && zoom_mode) zoom_auto_down<=1;
+            if(key_auto_stable && zoom_auto_down) begin
+                zoom_auto_down<=0;
+                if(zoom_mode && zoom_level>0) zoom_level<=zoom_level-1'b1;
+            end
+            if(img_idx!=zoom_image_id) begin zoom_image_id<=img_idx; zoom_level<=1; end
         end
     end
     sd_fat32_image_source #(.PCM_ENABLE(PCM_ENABLE)) u_image_source (
@@ -264,7 +317,8 @@ module sd_card_bmp_fat32 #(
         .debug_resource_valid(source_debug_resource_valid),
         .debug_sd_state(source_debug_sd_state),
         .debug_sd_cmd_error(source_debug_sd_cmd_error),
-        .debug_sd_cmd_error_latched(source_debug_sd_cmd_error_latched)
+        .debug_sd_cmd_error_latched(source_debug_sd_cmd_error_latched),
+        .debug_load_pipeline(source_debug_load_pipeline)
     );
 
 
@@ -353,8 +407,10 @@ module sd_card_bmp_fat32 #(
 
                 if(scan_completed && img_found_count != 0) begin
                     if(next_release_pulse) next_req_pending<=1;
-                    if(key_auto_press) key_auto_down_seen<=1;
-                    if(!key_auto_stable) begin
+                    if(key_auto_press && !zoom_mode) key_auto_down_seen<=1;
+                    if(zoom_mode) begin
+                        long_press_cnt<=0; long_press_marked<=0; key_auto_down_seen<=0;
+                    end else if(!key_auto_stable) begin
                         if(long_press_cnt < LONG_PRESS_CYCLES-1) long_press_cnt<=long_press_cnt+1'b1;
                         else if(!long_press_marked) begin
                             long_press_marked<=1;
@@ -367,7 +423,7 @@ module sd_card_bmp_fat32 #(
                             key_auto_down_seen<=0;
                         end
                     end
-                    if(auto_play_en && display_valid && display_settled &&
+                    if(auto_play_en && !zoom_mode && display_valid && display_settled &&
                        (!load_busy || load_is_prefetch) &&
                        !next_req_pending && !prev_req_pending && preload_next_idx>=preload_limit &&
                        img_found_count>1) begin

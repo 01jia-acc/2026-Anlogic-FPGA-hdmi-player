@@ -16,6 +16,7 @@ module tb_multi_bmp_cache #(
     wire [3:0] image_id, pix_id, ack_id;
     integer loads=0, i, saved_loads, old_id, bank, boot_count;
     reg saved_toggle;
+    reg [63:0] test_pipeline;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
         .LOAD_TIMEOUT_MS(WIPE_FRAMES > 1 ? 20000 : 2000), .PCM_ENABLE(1)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(1'b0),
@@ -246,9 +247,23 @@ module tb_multi_bmp_cache #(
         boot;
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
         wait(dut.load_busy);
+        wait(dut.load_prepare==0);
+        @(negedge clk);
+        test_pipeline=64'h89ab032101234567;
+        force dut.source_debug_load_pipeline=test_pipeline;
+        // File done but SDRAM completion missing: retain this distinction.
+        source_done=1;
+        @(negedge clk); source_done=0;
         wait(dut.preload_halted);
+        @(negedge clk);
         if(dut.last_error!=8'he0 || image_id!=3 || dut.image_complete[write_bank])
             $fatal(1,"Timed-out demand published an incomplete cache");
+        test_pipeline=0;
+        repeat(4) @(negedge clk);
+        if(!dut.pipeline_frozen || dut.debug_load_pipeline!==
+            {16'h89ab,5'b10001,11'h321,32'h01234567})
+            $fatal(1,"Timeout snapshot lost pre-abort source or scheduler progress: %h",dut.debug_load_pipeline);
+        release dut.source_debug_load_pipeline;
         frame(3);
         // A second key during mixed frames must remain pending until the old
         // bank is released. Both targets are cached, so loading cannot mask it.

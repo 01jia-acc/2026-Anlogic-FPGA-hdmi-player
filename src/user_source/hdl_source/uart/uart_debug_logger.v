@@ -29,6 +29,7 @@ module uart_debug_logger #(
     input  wire [15:0] sector_done_count,
     input wire [4:0] load_image_number,
     input wire [31:0] load_cluster, load_size,
+    input wire [63:0] load_pipeline,
     output wire       tx
 );
     localparam integer LOG_INTERVAL_CYCLES =
@@ -36,7 +37,8 @@ module uart_debug_logger #(
     // 诊断行示例：
     // P=1 I=1 T=1 B=1 D=0 E=00 V=0 S=2 A=1 L=00000000 C=000 Q=06 X=0 F=0 N=0000 R=00\r\n
     // J为加载的播放序号（十六进制、从1开始），K为首簇，Z为文件字节数。
-    localparam integer MESSAGE_LENGTH = 107;
+    // H is the live pipeline snapshot, frozen by the scheduler on load abort.
+    localparam integer MESSAGE_LENGTH = 126;
 
     reg [31:0] interval_count;
     reg        boot_pending;
@@ -62,6 +64,7 @@ module uart_debug_logger #(
     reg [15:0] snap_sector_done_count;
     reg [4:0] snap_load_image_number;
     reg [31:0] snap_load_cluster, snap_load_size;
+    reg [63:0] snap_load_pipeline;
 
     wire       tx_busy;
     wire [7:0] tx_byte;
@@ -185,9 +188,16 @@ module uart_debug_logger #(
                 7'd102: message_byte = hex_ascii(snap_load_size[11:8]);
                 7'd103: message_byte = hex_ascii(snap_load_size[7:4]);
                 7'd104: message_byte = hex_ascii(snap_load_size[3:0]);
-                7'd105: message_byte = 8'h0d;
-                7'd106: message_byte = 8'h0a;
-                default: message_byte = " ";
+                7'd105: message_byte = " ";
+                7'd106: message_byte = "H";
+                7'd107: message_byte = "=";
+                7'd124: message_byte = 8'h0d;
+                7'd125: message_byte = 8'h0a;
+                default: begin
+                    if(index>=108 && index<=123)
+                        message_byte = hex_ascii(snap_load_pipeline[(123-index)*4 +:4]);
+                    else message_byte = " ";
+                end
             endcase
         end
     endfunction
@@ -230,6 +240,7 @@ module uart_debug_logger #(
             snap_resource_valid <= 4'd0;
             snap_sector_done_count <= 16'd0;
             snap_load_image_number<=0; snap_load_cluster<=0; snap_load_size<=0;
+            snap_load_pipeline<=0;
         end else begin
             // tx_start 是送给 uart_tx 的寄存器脉冲。由于两个 always 块在同一
             // 个时钟沿使用非阻塞赋值，当前 always 置 tx_start=1 后，uart_tx
@@ -261,6 +272,7 @@ module uart_debug_logger #(
                     snap_sector_done_count <= sector_done_count;
                     snap_load_image_number<=load_image_number;
                     snap_load_cluster<=load_cluster; snap_load_size<=load_size;
+                    snap_load_pipeline<=load_pipeline;
                     message_index      <= 7'd0;
                     message_active     <= 1'b1;
                     boot_pending       <= 1'b0;

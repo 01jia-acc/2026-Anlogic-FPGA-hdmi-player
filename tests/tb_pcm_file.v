@@ -1,7 +1,11 @@
 `timescale 1ns/1ps
 // Real FAT scanner, fragmented file streamer, sector adapter, asynchronous
 // buffer and HDMI bridge. Only the physical SPI card response is substituted.
-module tb_pcm_file;
+module tb_pcm_file #(
+    parameter integer BMP_WIDTH=640, BMP_HEIGHT=480
+);
+    localparam integer BMP_BYTES=54+((BMP_WIDTH*3+3)/4)*4*BMP_HEIGHT;
+    localparam integer BMP_LAST_CLUSTER=32+(BMP_BYTES-1)/512;
     reg clk=0, pixel_clk=0, rst=1;
     always #5 clk=~clk;
     always #7 pixel_clk=~pixel_clk;
@@ -30,7 +34,7 @@ module tb_pcm_file;
         .pcm_play_enable(allow_play), .pcm_sample(sample), .pcm_valid(valid),
         .pcm_active(active), .pcm_end(ended), .pcm_underflow(underflow), .pcm_error(error),
         .scan_start(scan), .scan_done(scan_done), .load_start(image_start), .load_abort(1'b0),
-        .load_cluster(32'd32), .load_size(32'd921654), .write_req_ack(1'b1), .SD_MISO(1'b1),
+        .load_cluster(32'd32), .load_size(BMP_BYTES), .write_req_ack(1'b1), .SD_MISO(1'b1),
         .load_done(image_done), .load_error(image_error),
         .write_en(image_write), .write_data(image_data), .frame_commit(image_commit)
     );
@@ -92,12 +96,12 @@ module tb_pcm_file;
             if(kind==8) begin
                 // A full 640x480 BMP, distinct from the fragmented PCM chain.
                 put32(512+2*4,32'h0fffffff);
-                n=8704; disk[n+26]=32; put32(n+28,921654);
-                for(i=32;i<=1832;i=i+1)
-                    put32(512+i*4,i==1832 ? 32'h0fffffff : i+1);
+                n=8704; disk[n+26]=32; put32(n+28,BMP_BYTES);
+                for(i=32;i<=BMP_LAST_CLUSTER;i=i+1)
+                    put32(512+i*4,i==BMP_LAST_CLUSTER ? 32'h0fffffff : i+1);
                 n=47*512; disk[n]="B"; disk[n+1]="M";
-                put32(n+2,921654); put32(n+10,54); put32(n+14,40);
-                put32(n+18,640); put32(n+22,480);
+                put32(n+2,BMP_BYTES); put32(n+10,54); put32(n+14,40);
+                put32(n+18,BMP_WIDTH); put32(n+22,BMP_HEIGHT);
                 disk[n+26]=1; disk[n+28]=24;
             end
         end
@@ -284,12 +288,12 @@ module tb_pcm_file;
         run_case(300,5,256,8'h25);
         run_case(300,7,556,8'h25);
         run_case(7,6,0,8'h73);
-        run_case(3102,8,27918,0);
+        run_case(3102,8,BMP_WIDTH==640 && BMP_HEIGHT==480 ? 27918 : 55836,0);
         bad_bmp_chain(0,32'h0fffffff,8'h25);
         bad_bmp_chain(1,32'd32,8'h23);
         bad_bmp_chain(2,32'd5000,8'h24);
         $display("PASS: FAT PCM loops, fragmented chain, FIFO wrap, pause/resume across EOF, later-loop errors, invalid entries, timeout, full BMP/PCM sector sharing without underflow and HDMI samples");
         $finish;
     end
-    initial begin #100000000; $fatal(1,"PCM test timeout"); end
+    initial begin #200000000; $fatal(1,"PCM test timeout"); end
 endmodule

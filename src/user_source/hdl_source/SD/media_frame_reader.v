@@ -10,7 +10,10 @@ module media_frame_reader #(
     parameter integer MAX_INFLIGHT_BURSTS = 2,
     parameter integer DIAG_RETURN_PATTERN = 0,
     parameter integer DIAG_SYNTH_STREAM = 0,
-    parameter integer REGION_READ_ENABLE = 0
+    parameter integer REGION_READ_ENABLE = 0,
+    parameter integer ZOOM_ENABLE = 0,
+    parameter integer FRAME_WIDTH = 640,
+    parameter integer FRAME_HEIGHT = 480
 ) (
     input  wire                  mem_clk,
     input  wire                  mem_rst_n,
@@ -40,7 +43,9 @@ module media_frame_reader #(
     // Frame-latched prefix from active_index; suffix from old_index. Every
     // boundary must be a multiple of BURST_SIZE. Disabled ports may be omitted.
     input  wire [1:0]            old_index,
-    input  wire [ADDR_WIDTH:0]   new_words
+    input  wire [ADDR_WIDTH:0]   new_words,
+    input  wire [1:0]            zoom_level,
+    output wire [1:0]            display_zoom_level
 );
     localparam [7:0] ERR_NONE          = 8'h00;
     localparam [7:0] ERR_FRAME_OVERRUN = 8'h61;
@@ -74,6 +79,28 @@ module media_frame_reader #(
     reg [1:0] frame_old_index_mem;
     reg [ADDR_WIDTH:0] frame_new_words_mem;
     reg [ADDR_WIDTH-1:0] burst_base_mem;
+    reg [1:0] request_zoom_pix, zoom_sync1_mem, zoom_sync2_mem, reload_zoom_mem, frame_zoom_mem;
+    assign display_zoom_level = request_zoom_pix;
+    localparam integer LINE_AW = FRAME_WIDTH<=2 ? 1 : $clog2(FRAME_WIDTH);
+    // Reuse the existing output FIFO. One synchronous row RAM is enough:
+    // read a contiguous source row, then sample it into one output row.
+    reg [23:0] zoom_line [(1<<LINE_AW)-1:0]; /* fehdl force_ram=1, ram_style="bram" */
+    reg [23:0] zoom_line_q;
+    localparam Z_READ=0, Z_ADDRESS=1, Z_PUSH=2;
+    reg [1:0] zoom_state, zoom_x_phase, zoom_y_phase;
+    reg [15:0] zoom_row_issued, zoom_row_returned, zoom_x, zoom_y, zoom_source_x;
+    reg [ADDR_WIDTH-1:0] zoom_row_base;
+    wire zoom_active = ZOOM_ENABLE && frame_zoom_mem!=1;
+    wire zoom_border = frame_zoom_mem==0 &&
+        (zoom_x<FRAME_WIDTH/4 || zoom_x>=FRAME_WIDTH*3/4 ||
+         zoom_y<FRAME_HEIGHT/4 || zoom_y>=FRAME_HEIGHT*3/4);
+    wire zoom_room, zoom_write;
+    always @(posedge mem_clk) begin
+        if(zoom_active && sdram_rd_valid && reader_busy && !reload_pending_mem)
+            zoom_line[zoom_row_returned[LINE_AW-1:0]]<=sdram_rd_data[31:8];
+        if(zoom_active && zoom_state==Z_ADDRESS && zoom_room)
+            zoom_line_q<=zoom_line[zoom_source_x[LINE_AW-1:0]];
+    end
     // synthesis translate_off
     always @(posedge pix_clk) begin
         if (pix_rst_n && REGION_READ_ENABLE && request_pending_pix && !frame_start &&
@@ -114,6 +141,8 @@ module media_frame_reader #(
     wire fifo_empty;
     wire fifo_almost_full;
     wire [FIFO_COUNT_W-1:0] fifo_wrusedw;
+    assign zoom_room = !fifo_full && fifo_wrusedw<FIFO_DEPTH-FIFO_MARGIN;
+    assign zoom_write = zoom_active && reader_busy && zoom_state==Z_PUSH && !fifo_reset;
     wire [31:0] fifo_raw_data;
     wire fifo_raw_valid;
     wire fifo_raw_read_en;
@@ -128,7 +157,8 @@ module media_frame_reader #(
         {{1{1'b0}}, inflight_words};
     localparam integer FULL_BURSTS_ONLY = (IMAGE_WORDS % BURST_SIZE) == 0;
     wire [ADDR_WIDTH:0] remaining_words = IMAGE_WORDS - issued_count_mem;
-    wire [ADDR_WIDTH:0] next_burst_words =
+    wire [ADDR_WIDTH:0] next_burst_words = zoom_active ?
+        ((FRAME_WIDTH-zoom_row_issued>BURST_SIZE) ? BURST_SIZE : FRAME_WIDTH-zoom_row_issued) :
         FULL_BURSTS_ONLY ? BURST_SIZE :
         ((remaining_words > BURST_SIZE) ? BURST_SIZE : remaining_words);
     wire [ADDR_WIDTH+2:0] reserved_after_burst =
@@ -147,7 +177,8 @@ module media_frame_reader #(
                        fifo_reset_count_mem == 0 && fifo_ready_mem[1] && !burst_active_mem &&
                        burst_gap_count_mem == 0 &&
                        issued_count_mem != IMAGE_WORDS &&
-                       inflight_window_ok_q && fifo_reservation_ok_q;
+                       inflight_window_ok_q && (zoom_active ?
+                           (zoom_state==Z_READ && zoom_row_issued<FRAME_WIDTH) : fifo_reservation_ok_q);
     wire issue_allowed = !DIAG_SYNTH_STREAM && reader_busy && burst_active_mem;
     // reader_busy 表示“整帧读取事务仍未完成”，不能直接拿来做 SDRAM
     // 仲裁；否则写侧会被锁住整个读帧，读侧又会等待写侧，形成死锁。
@@ -155,9 +186,10 @@ module media_frame_reader #(
     assign reader_bus_busy = burst_active_mem || !inflight_empty_mem;
     wire diag_stream_write = DIAG_SYNTH_STREAM && reader_busy &&
                              fifo_ready_mem[1] && !fifo_reset && !fifo_full;
-    wire fifo_write_enable = DIAG_SYNTH_STREAM ? diag_stream_write :
+    wire fifo_write_enable = zoom_active ? zoom_write : DIAG_SYNTH_STREAM ? diag_stream_write :
                              (sdram_rd_valid && !fifo_reset && !fifo_full);
-    wire [31:0] fifo_write_data = (DIAG_RETURN_PATTERN || DIAG_SYNTH_STREAM) ?
+    wire [31:0] fifo_write_data = zoom_active ? {zoom_border ? 24'd0 : zoom_line_q,8'd0} :
+                                  (DIAG_RETURN_PATTERN || DIAG_SYNTH_STREAM) ?
                                   {8'h00, diag_rgb_mem} : sdram_rd_data;
 
     always @* begin
@@ -200,6 +232,7 @@ module media_frame_reader #(
             request_index_pix <= 2'd0;
             request_old_index_pix <= 2'd0;
             request_new_words_pix <= IMAGE_WORDS;
+            request_zoom_pix <= 1;
             frame_armed_pix <= 1'b0;
             consumed_count_pix <= 0;
             underflow <= 1'b0;
@@ -220,6 +253,7 @@ module media_frame_reader #(
                 request_index_pix <= active_index;
                 request_old_index_pix <= REGION_READ_ENABLE ? old_index : active_index;
                 request_new_words_pix <= REGION_READ_ENABLE ? new_words : IMAGE_WORDS;
+                request_zoom_pix <= ZOOM_ENABLE ? zoom_level : 2'd1;
                 request_toggle_pix <= ~request_toggle_pix;
                 request_pending_pix <= 1'b0;
                 frame_armed_pix <= 1'b1;
@@ -247,6 +281,10 @@ module media_frame_reader #(
             new_words_sync1_mem <= IMAGE_WORDS; new_words_sync2_mem <= IMAGE_WORDS;
             reload_new_words_mem <= IMAGE_WORDS;
             frame_old_index_mem <= 0; frame_new_words_mem <= IMAGE_WORDS;
+            zoom_sync1_mem<=1; zoom_sync2_mem<=1; reload_zoom_mem<=1; frame_zoom_mem<=1;
+            zoom_state<=Z_READ; zoom_x_phase<=0; zoom_y_phase<=0;
+            zoom_row_issued<=0; zoom_row_returned<=0;
+            zoom_x<=0; zoom_y<=0; zoom_source_x<=0; zoom_row_base<=0;
             burst_base_mem <= 0;
             fifo_reset_count_mem <= 3'd0;
             issued_count_mem <= 0;
@@ -284,6 +322,7 @@ module media_frame_reader #(
             old_index_sync2_mem <= old_index_sync1_mem;
             new_words_sync1_mem <= request_new_words_pix;
             new_words_sync2_mem <= new_words_sync1_mem;
+            zoom_sync1_mem<=request_zoom_pix; zoom_sync2_mem<=zoom_sync1_mem;
             app_rd_en <= 1'b0;
             frame_read_done <= 1'b0;
             inflight_window_ok_q <= inflight_window_ok;
@@ -318,6 +357,7 @@ module media_frame_reader #(
                 reload_index_mem <= index_sync2_mem;
                 reload_old_index_mem <= old_index_sync2_mem;
                 reload_new_words_mem <= new_words_sync2_mem;
+                reload_zoom_mem<=zoom_sync2_mem;
                 if (reader_busy || !inflight_empty_mem) begin
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
@@ -330,6 +370,13 @@ module media_frame_reader #(
                 reader_index <= reload_index_mem;
                 frame_old_index_mem <= reload_old_index_mem;
                 frame_new_words_mem <= reload_new_words_mem;
+                frame_zoom_mem<=reload_zoom_mem;
+                zoom_state<=Z_READ; zoom_x_phase<=0; zoom_y_phase<=0;
+                zoom_row_issued<=0; zoom_row_returned<=0; zoom_x<=0; zoom_y<=0;
+                zoom_source_x<=reload_zoom_mem==2 ? FRAME_WIDTH/6 :
+                    reload_zoom_mem==3 ? FRAME_WIDTH/4 : 0;
+                zoom_row_base<=reload_zoom_mem==2 ? (FRAME_HEIGHT/6)*FRAME_WIDTH :
+                    reload_zoom_mem==3 ? (FRAME_HEIGHT/4)*FRAME_WIDTH : 0;
                 issued_count_mem <= 0;
                 returned_count_mem <= 0;
                 inflight_count_mem <= 0;
@@ -356,7 +403,9 @@ module media_frame_reader #(
 
             if (issue_allowed) begin
                 app_rd_en <= 1'b1;
-                app_rd_addr <= burst_base_mem + issued_count_mem[ADDR_WIDTH-1:0];
+                app_rd_addr <= burst_base_mem + (zoom_active ?
+                    zoom_row_base+zoom_row_issued : issued_count_mem[ADDR_WIDTH-1:0]);
+                if(zoom_active) zoom_row_issued<=zoom_row_issued+1'b1;
                 issued_count_mem <= issued_count_mem + 1'b1;
                 burst_issued_mem <= burst_issued_mem + 1'b1;
                 if (burst_issued_mem + 1'b1 == burst_target_mem) begin
@@ -367,7 +416,10 @@ module media_frame_reader #(
 
             if (!DIAG_SYNTH_STREAM && sdram_rd_valid) begin
                 returned_count_mem <= returned_count_mem + 1'b1;
-                if (fifo_full) begin
+                if(zoom_active) begin
+                    zoom_row_returned<=zoom_row_returned+1'b1;
+                    if(zoom_row_returned==FRAME_WIDTH-1) zoom_state<=Z_ADDRESS;
+                end else if (fifo_full) begin
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
                     reader_error <= ERR_FIFO_OVERFLOW;
@@ -375,6 +427,45 @@ module media_frame_reader #(
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
                     frame_read_done <= 1'b1;
+                end
+            end
+
+            if(zoom_active && reader_busy && !reload_pending_mem &&
+               request_sync2_mem==request_seen_mem) begin
+                if(zoom_state==Z_ADDRESS && zoom_room && !fifo_reset) zoom_state<=Z_PUSH;
+                if(zoom_write) begin
+                    zoom_state<=Z_ADDRESS;
+                    if(zoom_x==FRAME_WIDTH-1) begin
+                        zoom_x<=0; zoom_x_phase<=0;
+                        zoom_source_x<=frame_zoom_mem==2 ? FRAME_WIDTH/6 :
+                            frame_zoom_mem==3 ? FRAME_WIDTH/4 : 0;
+                        if(zoom_y==FRAME_HEIGHT-1) begin
+                            reader_busy<=0; frame_read_done<=1;
+                        end else begin
+                            zoom_y<=zoom_y+1'b1; zoom_state<=Z_READ;
+                            zoom_row_issued<=0; zoom_row_returned<=0;
+                            case(frame_zoom_mem)
+                                0: if(zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4-1)
+                                    zoom_row_base<=zoom_row_base+2*FRAME_WIDTH;
+                                2: if(zoom_y_phase>=1) begin
+                                    zoom_y_phase<=zoom_y_phase-1'b1;
+                                    zoom_row_base<=zoom_row_base+FRAME_WIDTH;
+                                end else zoom_y_phase<=zoom_y_phase+2'd2;
+                                3: if(zoom_y[0]) zoom_row_base<=zoom_row_base+FRAME_WIDTH;
+                            endcase
+                        end
+                    end else begin
+                        zoom_x<=zoom_x+1'b1;
+                        case(frame_zoom_mem)
+                            0: if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
+                                zoom_source_x<=zoom_source_x+2'd2;
+                            2: if(zoom_x_phase>=1) begin
+                                zoom_x_phase<=zoom_x_phase-1'b1;
+                                zoom_source_x<=zoom_source_x+1'b1;
+                            end else zoom_x_phase<=zoom_x_phase+2'd2;
+                            3: if(zoom_x[0]) zoom_source_x<=zoom_source_x+1'b1;
+                        endcase
+                    end
                 end
             end
 

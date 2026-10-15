@@ -14,7 +14,7 @@
 //   ① sd_card_top        ：SPI 初始化和 CMD17 单块读（直接驱动 SD 引脚）；
 //   ② sd_sector_adapter  ：把上面的原始驱动包装成统一的 512 字节扇区接口；
 //   ③ scanner 和 streamer：共享这条扇区通道，但扫描期间 scanner 优先（仲裁）；
-//   ④ streamer 输出文件字节，decoder 并行输出 RGB 像素；
+//   ④ streamer → 字节 FIFO → decoder → 双线性 scaler，输出固定屏幕尺寸 RGB；
 //   ⑤ SOURCE_ACK 等待帧写端确认 FIFO/帧缓存准备好，再开始读文件。
 //
 // 【三大事务接口（从本模块往外看）】
@@ -40,7 +40,9 @@ module sd_fat32_image_source #(
     parameter integer MAX_VISITED_CLUSTERS = 8388608,
     parameter integer PCM_ENABLE = 0,
     parameter integer PCM_FIFO_ADDR_WIDTH = 12,
-    parameter integer PCM_SECTOR_TIMEOUT = 100_000_000
+    parameter integer PCM_SECTOR_TIMEOUT = 100_000_000,
+    parameter integer DISPLAY_WIDTH = 640,
+    parameter integer DISPLAY_HEIGHT = 480
 ) (
     // 整条 FAT/SD/解码链使用同一 clk；rst 高有效。
     input  wire        clk,            // 系统时钟（100MHz，来自顶层）
@@ -91,9 +93,9 @@ module sd_fat32_image_source #(
     output wire        write_req,      // 电平："我要写一整帧"（保持到 write_req_ack）
     input  wire        write_req_ack,  // 输入：帧写端已清空 FIFO/锁存地址，可以灌
     output wire        write_en,       // =1 时 write_data 是一个有效像素
-    output wire        frame_commit,   // 事件：最后一个像素已经从解码器输出
+    output wire        frame_commit,   // 事件：文件校验成功且缩放像素已完整输出
     // 帧写端握手及 32 位像素数据（RGB888 + 低 8 位空置）。
-    output wire [31:0] write_data,     // {decoder_pixel_rgb, 8'h00}
+    output wire [31:0] write_data,     // {scaled_rgb, 8'h00}
 
     // ===================== 端口：SD 卡状态与 SPI 引脚 =====================
     output wire        sd_init_done,   // 电平：SD 卡 SPI 初始化完成
@@ -112,7 +114,8 @@ module sd_fat32_image_source #(
     output wire [3:0]  debug_resource_valid,
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
-    output wire        debug_sd_cmd_error_latched
+    output wire        debug_sd_cmd_error_latched,
+    output wire [63:0] debug_load_pipeline
 );
     // ========================================================================
     // 内部 wire：SD 原始驱动的单块读接口（只连接 adapter 与 sd_card_top）
@@ -215,26 +218,81 @@ module sd_fat32_image_source #(
     wire decoder_frame_commit;      // 整帧像素全部输出完成
     wire decoder_done;              // 事件：解码结束（加载事务的收尾信号）
     wire [7:0] decoder_error;       // decoder 错误码
+    reg [1:0] source_state;
+    reg decoder_start;
+    localparam SOURCE_IDLE=2'd0, SOURCE_ACK=2'd1, SOURCE_STREAM=2'd2, SOURCE_AUDIO=2'd3;
+    wire [15:0] decoder_width, decoder_height, decoder_x, decoder_y;
+    wire scaler_input_ready, scaled_valid, scaled_done;
+    wire [3:0] scaler_debug_state;
+    wire [23:0] scaled_rgb;
+    reg decoder_finished, scaler_finished;
+    // A complete SD sector cannot be paused. Reserve 512 bytes plus pipeline
+    // margin before granting BMP; pause only the buffered decoder byte stream.
+    reg [7:0] image_bytes [0:1023];
+    reg [9:0] byte_wr_ptr, byte_rd_ptr;
+    reg [10:0] byte_count;
+    reg [31:0] next_decode_offset, buffered_offset;
+    reg [7:0] buffered_byte;
+    reg buffered_valid, file_end_pending, file_end_sent;
+    wire image_sector_space = byte_count <= 508;
+    wire byte_pop = byte_count!=0 && scaler_input_ready && source_state==SOURCE_STREAM;
+    wire buffered_end = file_end_pending && byte_count==0 && !buffered_valid && !file_end_sent;
+
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            byte_wr_ptr<=0; byte_rd_ptr<=0; byte_count<=0;
+            next_decode_offset<=0; buffered_offset<=0;
+            buffered_valid<=0; file_end_pending<=0; file_end_sent<=0;
+            decoder_finished<=0; scaler_finished<=0;
+        end else if(decoder_start || load_abort) begin
+            byte_wr_ptr<=0; byte_rd_ptr<=0; byte_count<=0;
+            next_decode_offset<=0; buffered_valid<=0;
+            file_end_pending<=0; file_end_sent<=0;
+            decoder_finished<=0; scaler_finished<=0;
+        end else begin
+            buffered_valid<=byte_pop;
+            if(streamer_file_valid) byte_wr_ptr<=byte_wr_ptr+1'b1;
+            if(byte_pop) begin
+                byte_rd_ptr<=byte_rd_ptr+1'b1;
+                buffered_offset<=next_decode_offset;
+                next_decode_offset<=next_decode_offset+1'b1;
+            end
+            case({streamer_file_valid,byte_pop})
+                2'b10: byte_count<=byte_count+1'b1;
+                2'b01: byte_count<=byte_count-1'b1;
+                default: ;
+            endcase
+            if(streamer_file_done) file_end_pending<=1;
+            if(buffered_end) file_end_sent<=1;
+            if(decoder_done) decoder_finished<=1;
+            if(scaled_done) scaler_finished<=1;
+        end
+    end
+    // Separate synchronous RAM process; do not reset the sector storage.
+    always @(posedge clk) begin
+        if(streamer_file_valid) image_bytes[byte_wr_ptr]<=streamer_file_byte;
+        if(byte_pop) buffered_byte<=image_bytes[byte_rd_ptr];
+    end
 
     // ========================================================================
     // 内部 reg：外壳状态机
     // ========================================================================
     // 外壳级三状态：空闲、等待写端确认、文件字节/像素流传输。
-    reg [1:0] source_state;
     // 锁存一次 load_start 提供的资源参数，避免上层改变输入影响正在进行的读。
     reg [31:0] load_cluster_q;      // 本次加载事务的首簇号（冻结副本）
     reg [31:0] load_size_q;         // 本次加载事务的字节数（冻结副本）
     // 送给 streamer/decoder 的一拍启动脉冲。
     reg streamer_start;             // 事件：启动文件流
-    reg decoder_start;              // 事件：启动 BMP 解码
 
     // 状态编码：唯一的状态机，case 里的分支就是全部事务流程。
-    localparam SOURCE_IDLE   = 2'd0;  // 空闲：可接受新加载事务
-    localparam SOURCE_ACK    = 2'd1;  // 已发 write_req，等帧写端 ack
-    localparam SOURCE_STREAM = 2'd2;  // 正在流文件字节 + 输出像素
-    localparam SOURCE_AUDIO = 2'd3;   // PCM文件流占用扇区通道
     localparam CHANNEL_NONE = 2'd0, CHANNEL_BMP = 2'd1, CHANNEL_PCM = 2'd2;
     reg [1:0] sector_owner;
+    // High 16 bits: source/scaler/owner, then eight progress flags.
+    // Middle 16 bits: five reserved bits + FIFO occupancy. Low 32: byte offset.
+    assign debug_load_pipeline = {source_state, scaler_debug_state, sector_owner,
+        decoder_header_accepted, scaler_input_ready, decoder_finished, scaler_finished,
+        file_end_pending, file_end_sent, streamer_file_busy, write_req_ack,
+        5'd0, byte_count, next_decode_offset};
     wire audio_fault;
     wire audio_read_allowed = audio_running && !audio_fault &&
         (source_state == SOURCE_STREAM ||
@@ -257,13 +315,15 @@ module sd_fat32_image_source #(
     assign load_busy = (source_state == SOURCE_ACK || source_state == SOURCE_STREAM);
     // write_req 只在 SOURCE_ACK 阶段为 1：事务开始读文件前先请求写端准备。
     assign write_req = (source_state == SOURCE_ACK);
-    // 只有流传输阶段 + 解码器输出有效像素时，write_data 才有效。
-    assign write_en = (source_state == SOURCE_STREAM) && decoder_pixel_valid;
-    // 这个事件来自 BMP 解码器，而不是“文件扇区读完”。
-    // 只有最后一个 RGB 像素已经产生后，写入器才允许提交整帧。
-    assign frame_commit = decoder_frame_commit;
+    // 只有流传输阶段 + 缩放器输出有效像素时，write_data 才有效。
+    assign write_en = (source_state == SOURCE_STREAM) && scaled_valid;
+    // 文件成功解码与缩放输出完成必须同时满足，不能只用文件读完来提交。
+    // decoder_start is registered in SOURCE_ACK. On the first STREAM cycle
+    // the previous file's sticky completion flags have not been cleared yet.
+    assign frame_commit = source_state==SOURCE_STREAM && !decoder_start && decoder_finished &&
+        scaler_finished && decoder_error==0 && streamer_fs_error==0;
     // 像素打包：RGB888 放高 24 位，低 8 位填 0，凑成 32 位存储字。
-    assign write_data = {decoder_pixel_rgb, 8'h00};
+    assign write_data = {scaled_rgb, 8'h00};
 
     // 诊断观察口只做连续映射。日志看到的 S/L/C/Q 可以按层逐级判断：
     // S 是 FAT 扫描状态，L/C 是扇区事务地址和字节进度，Q 是 SD 高层状态。
@@ -288,7 +348,7 @@ module sd_fat32_image_source #(
             if (!scanner_scan_busy && !sector_busy && !sector_done) begin
                 if (audio_read_allowed && pcm_sector_ready && audio_sector_pending)
                     sector_owner <= CHANNEL_PCM;
-                else if (source_state == SOURCE_STREAM && streamer_sector_pending)
+                else if (source_state == SOURCE_STREAM && streamer_sector_pending && image_sector_space)
                     sector_owner <= CHANNEL_BMP;
             end
         end else if (sector_done) sector_owner <= CHANNEL_NONE;
@@ -312,7 +372,7 @@ module sd_fat32_image_source #(
     assign scanner_sector_done = sector_done;
     assign scanner_sector_error = sector_error;
     // 请求之前预留整个扇区的缓冲；一旦发出请求就必须接收全部字节。
-    assign streamer_sector_busy = sector_busy || sector_owner != CHANNEL_BMP || scanner_scan_busy;
+    assign streamer_sector_busy = sector_busy || sector_owner != CHANNEL_BMP || scanner_scan_busy || !image_sector_space;
     assign streamer_sector_valid = sector_valid && sector_owner == CHANNEL_BMP && !scanner_scan_busy;
     assign streamer_sector_byte = sector_byte;
     assign streamer_sector_byte_index = sector_byte_index;
@@ -495,11 +555,12 @@ module sd_fat32_image_source #(
     // ========================================================================
     // 实例⑤：bmp24_decoder —— BMP 文件字节 → RGB 像素流
     // ========================================================================
-    // 职责：解析 BMP 头（校验 640x480 24bit）→ 从文件字节流中取像素数据 →
-    // 输出 pixel_valid/pixel_rgb 像素流。与 streamer 并行工作。
+    // 职责：校验正高度、无压缩 RGB24 BMP（最大 1920x1080），输出原图像素。
+    // 字节 FIFO 在行间暂停解码，为后面的双线性插值留出运算时间。
     bmp24_decoder #(
-        .EXPECTED_WIDTH (640),   // 只接受 640 宽的 BMP
-        .EXPECTED_HEIGHT(480)    // 只接受 480 高的 BMP
+        .EXPECTED_WIDTH (640),   // ALLOW_RESIZE=1 时按 MAX_WIDTH/HEIGHT 校验
+        .EXPECTED_HEIGHT(480),
+        .ALLOW_RESIZE(1), .MAX_WIDTH(1920), .MAX_HEIGHT(1080)
     ) u_bmp24_decoder (
         .clk                  (clk),
         .rst_n                (~rst),
@@ -507,25 +568,41 @@ module sd_fat32_image_source #(
         .file_start           (decoder_start),
         .file_abort           (load_abort),
         .file_size            (load_size_q),
-        // 文件字节流输入（直接来自 streamer）
-        .file_valid           (streamer_file_valid && source_state == SOURCE_STREAM),
-        .file_byte            (streamer_file_byte),
-        .file_byte_offset     (streamer_file_byte_offset),
-        .file_end             (streamer_file_done && source_state == SOURCE_STREAM),
+        // 文件字节流输入（来自可暂停的字节 FIFO）
+        .file_valid           (buffered_valid && source_state == SOURCE_STREAM),
+        .file_byte            (buffered_byte),
+        .file_byte_offset     (buffered_offset),
+        .file_end             (buffered_end && source_state == SOURCE_STREAM),
         .upstream_error       (streamer_fs_error),   // 上游 FS 错误透传
-        // 输出（pixel_valid/pixel_rgb 接 write_en/write_data）
+        // 输出原尺寸像素，交给 scaler
         .header_accepted      (decoder_header_accepted),
         .pixel_valid          (decoder_pixel_valid),
         .pixel_rgb            (decoder_pixel_rgb),
-        .pixel_x              (),   // 未使用
-        .pixel_y              (),   // 未使用
+        .pixel_x              (decoder_x),
+        .pixel_y              (decoder_y),
         .frame_commit         (decoder_frame_commit),
         .bmp_done             (decoder_done),        // 解码结束（事务收尾信号）
         .bmp_error            (decoder_error),
         .top_down             (),   // 未使用
         .pixel_offset         (),   // 未使用
-        .row_stride           ()    // 未使用
+        .row_stride           (),
+        .image_width          (decoder_width), .image_height(decoder_height)
     );
+
+    image_bilinear_scaler #(.OUT_WIDTH(DISPLAY_WIDTH), .OUT_HEIGHT(DISPLAY_HEIGHT)) u_scaler (
+        .clk(clk), .rst(rst), .start(decoder_start),
+        .abort(load_abort || decoder_error!=0),
+        .header_valid(decoder_header_accepted),
+        .source_width(decoder_width), .source_height(decoder_height),
+        .pixel_valid(decoder_pixel_valid), .pixel_rgb(decoder_pixel_rgb),
+        .pixel_x(decoder_x), .pixel_y(decoder_y), .input_ready(scaler_input_ready),
+        .output_valid(scaled_valid), .output_rgb(scaled_rgb),
+        .done(scaled_done), .debug_state(scaler_debug_state)
+    );
+    // synthesis translate_off
+    always @(posedge clk) if(!rst && byte_count>1024)
+        $fatal(1,"BMP sector FIFO overflow");
+    // synthesis translate_on
 
     // ========================================================================
     // 外壳时序控制中心：唯一的 always 块
@@ -652,7 +729,7 @@ module sd_fat32_image_source #(
                     SOURCE_STREAM: begin
                         // decoder_done 是文件流已经结束的结果事件；错误码在此
                         // 汇总后保持到下一次 load_start。
-                        if (decoder_done) begin
+                        if (!decoder_start && decoder_finished && (decoder_error!=0 || streamer_fs_error!=0 || scaler_finished)) begin
                             // 收尾：报完成事件，汇总错误码（decoder 优先于 streamer），
                             // 回到空闲等待下一次事务。
                             load_done <= 1'b1;

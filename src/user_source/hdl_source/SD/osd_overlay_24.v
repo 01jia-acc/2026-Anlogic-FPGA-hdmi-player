@@ -51,3 +51,48 @@ module osd_overlay_24 #(
     assign de_out=de;
     assign osd_active=hit;
 endmodule
+
+// Shared output coordinates; no additional video pipeline latency.
+// Keep this module in the registered OSD source to avoid a new project entry.
+module zoom_status_osd (
+    input wire clk, rst_n, de,
+    input wire [11:0] pixel_x, pixel_y,
+    input wire zoom_mode,
+    input wire [1:0] zoom_level,
+    input wire [23:0] rgb_in,
+    output wire [23:0] rgb_out
+);
+    reg mode_q;
+    always @(posedge clk or negedge rst_n)
+        if(!rst_n) mode_q<=0;
+        else if(!de) mode_q<=zoom_mode;
+    wire [11:0] dx=pixel_x-80, dy=pixel_y-8;
+    reg [34:0] glyph;
+    reg [7:0] ch;
+    reg [4:0] row;
+    always @* begin
+        case(dx[6:3])
+            0:ch="Z"; 1,2:ch="O"; 3:ch="M";
+            5:ch=zoom_level==0 ? "0" : zoom_level==3 ? "2" : "1";
+            6:ch=".";
+            7:ch=(zoom_level==0 || zoom_level==2) ? "5" : "0";
+            8:ch="X";
+            default:ch=" ";
+        endcase
+        case(ch)
+            "Z":glyph={5'b11111,5'b00001,5'b00010,5'b00100,5'b01000,5'b10000,5'b11111};
+            "O","0":glyph={5'b01110,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01110};
+            "M":glyph={5'b10001,5'b11011,5'b10101,5'b10101,5'b10001,5'b10001,5'b10001};
+            "1":glyph={5'b00100,5'b01100,5'b00100,5'b00100,5'b00100,5'b00100,5'b01110};
+            "2":glyph={5'b01110,5'b10001,5'b00001,5'b00010,5'b00100,5'b01000,5'b11111};
+            "5":glyph={5'b11111,5'b10000,5'b10000,5'b11110,5'b00001,5'b00001,5'b11110};
+            ".":glyph={5'b00000,5'b00000,5'b00000,5'b00000,5'b00000,5'b00100,5'b00100};
+            "X":glyph={5'b10001,5'b10001,5'b01010,5'b00100,5'b01010,5'b10001,5'b10001};
+            default:glyph=0;
+        endcase
+        row=dy<7 ? (glyph >> ((6-dy[2:0])*5)) : 0;
+    end
+    wire hit=de && (mode_q || zoom_level!=1) && pixel_x>=80 && pixel_x<152 &&
+        pixel_y>=8 && pixel_y<15 && dx[2:0]<5 && row[4-dx[2:0]];
+    assign rgb_out=hit ? (mode_q ? 24'hffff00 : 24'hffffff) : rgb_in;
+endmodule
