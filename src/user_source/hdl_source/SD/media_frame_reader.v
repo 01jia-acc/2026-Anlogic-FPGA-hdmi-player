@@ -9,7 +9,8 @@ module media_frame_reader #(
     parameter integer BURST_GAP_CYCLES = 12,
     parameter integer MAX_INFLIGHT_BURSTS = 2,
     parameter integer DIAG_RETURN_PATTERN = 0,
-    parameter integer DIAG_SYNTH_STREAM = 0
+    parameter integer DIAG_SYNTH_STREAM = 0,
+    parameter integer REGION_READ_ENABLE = 0
 ) (
     input  wire                  mem_clk,
     input  wire                  mem_rst_n,
@@ -35,7 +36,11 @@ module media_frame_reader #(
     output wire                  reader_bus_busy,
     output reg                   frame_read_done,
     output reg  [1:0]            reader_index,
-    output reg  [7:0]            reader_error
+    output reg  [7:0]            reader_error,
+    // Frame-latched prefix from active_index; suffix from old_index. Every
+    // boundary must be a multiple of BURST_SIZE. Disabled ports may be omitted.
+    input  wire [1:0]            old_index,
+    input  wire [ADDR_WIDTH:0]   new_words
 );
     localparam [7:0] ERR_NONE          = 8'h00;
     localparam [7:0] ERR_FRAME_OVERRUN = 8'h61;
@@ -52,6 +57,8 @@ module media_frame_reader #(
     reg request_pending_pix;
     reg request_toggle_pix;
     reg [1:0] request_index_pix;
+    reg [1:0] request_old_index_pix;
+    reg [ADDR_WIDTH:0] request_new_words_pix;
     reg frame_armed_pix;
     reg [ADDR_WIDTH:0] consumed_count_pix;
 
@@ -62,6 +69,18 @@ module media_frame_reader #(
     reg [1:0] index_sync2_mem;
     reg reload_pending_mem;
     reg [1:0] reload_index_mem;
+    reg [1:0] old_index_sync1_mem, old_index_sync2_mem, reload_old_index_mem;
+    reg [ADDR_WIDTH:0] new_words_sync1_mem, new_words_sync2_mem, reload_new_words_mem;
+    reg [1:0] frame_old_index_mem;
+    reg [ADDR_WIDTH:0] frame_new_words_mem;
+    reg [ADDR_WIDTH-1:0] burst_base_mem;
+    // synthesis translate_off
+    always @(posedge pix_clk) begin
+        if (pix_rst_n && REGION_READ_ENABLE && request_pending_pix && !frame_start &&
+            (new_words > IMAGE_WORDS || new_words % BURST_SIZE != 0))
+            $fatal(1, "Region boundary must be within the image and burst aligned");
+    end
+    // synthesis translate_on
     reg [2:0] fifo_reset_count_mem;
     reg [ADDR_WIDTH:0] issued_count_mem;
     reg [ADDR_WIDTH:0] returned_count_mem;
@@ -179,6 +198,8 @@ module media_frame_reader #(
             request_pending_pix <= 1'b0;
             request_toggle_pix <= 1'b0;
             request_index_pix <= 2'd0;
+            request_old_index_pix <= 2'd0;
+            request_new_words_pix <= IMAGE_WORDS;
             frame_armed_pix <= 1'b0;
             consumed_count_pix <= 0;
             underflow <= 1'b0;
@@ -197,6 +218,8 @@ module media_frame_reader #(
                 request_pending_pix <= 1'b1;
             end else if (request_pending_pix) begin
                 request_index_pix <= active_index;
+                request_old_index_pix <= REGION_READ_ENABLE ? old_index : active_index;
+                request_new_words_pix <= REGION_READ_ENABLE ? new_words : IMAGE_WORDS;
                 request_toggle_pix <= ~request_toggle_pix;
                 request_pending_pix <= 1'b0;
                 frame_armed_pix <= 1'b1;
@@ -220,6 +243,11 @@ module media_frame_reader #(
             index_sync2_mem <= 2'd0;
             reload_pending_mem <= 1'b0;
             reload_index_mem <= 2'd0;
+            old_index_sync1_mem <= 0; old_index_sync2_mem <= 0; reload_old_index_mem <= 0;
+            new_words_sync1_mem <= IMAGE_WORDS; new_words_sync2_mem <= IMAGE_WORDS;
+            reload_new_words_mem <= IMAGE_WORDS;
+            frame_old_index_mem <= 0; frame_new_words_mem <= IMAGE_WORDS;
+            burst_base_mem <= 0;
             fifo_reset_count_mem <= 3'd0;
             issued_count_mem <= 0;
             returned_count_mem <= 0;
@@ -250,6 +278,12 @@ module media_frame_reader #(
             request_sync2_mem <= request_sync1_mem;
             index_sync1_mem <= request_index_pix;
             index_sync2_mem <= index_sync1_mem;
+            // Bundled frame descriptor: held with request_index_pix until the
+            // next video frame; synchronize/capture alongside the same toggle.
+            old_index_sync1_mem <= request_old_index_pix;
+            old_index_sync2_mem <= old_index_sync1_mem;
+            new_words_sync1_mem <= request_new_words_pix;
+            new_words_sync2_mem <= new_words_sync1_mem;
             app_rd_en <= 1'b0;
             frame_read_done <= 1'b0;
             inflight_window_ok_q <= inflight_window_ok;
@@ -282,6 +316,8 @@ module media_frame_reader #(
                 request_seen_mem <= request_sync2_mem;
                 reload_pending_mem <= 1'b1;
                 reload_index_mem <= index_sync2_mem;
+                reload_old_index_mem <= old_index_sync2_mem;
+                reload_new_words_mem <= new_words_sync2_mem;
                 if (reader_busy || !inflight_empty_mem) begin
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
@@ -292,6 +328,8 @@ module media_frame_reader #(
             if (reload_pending_mem && inflight_empty_mem) begin
                 reload_pending_mem <= 1'b0;
                 reader_index <= reload_index_mem;
+                frame_old_index_mem <= reload_old_index_mem;
+                frame_new_words_mem <= reload_new_words_mem;
                 issued_count_mem <= 0;
                 returned_count_mem <= 0;
                 inflight_count_mem <= 0;
@@ -308,6 +346,9 @@ module media_frame_reader #(
             end
 
             if (start_burst) begin
+                // Choose only between bursts; no bank jump inside a burst.
+                burst_base_mem <= bank_base((REGION_READ_ENABLE &&
+                    issued_count_mem >= frame_new_words_mem) ? frame_old_index_mem : reader_index);
                 burst_active_mem <= 1'b1;
                 burst_issued_mem <= 0;
                 burst_target_mem <= next_burst_words[BURST_COUNT_W-1:0];
@@ -315,7 +356,7 @@ module media_frame_reader #(
 
             if (issue_allowed) begin
                 app_rd_en <= 1'b1;
-                app_rd_addr <= bank_base(reader_index) + issued_count_mem[ADDR_WIDTH-1:0];
+                app_rd_addr <= burst_base_mem + issued_count_mem[ADDR_WIDTH-1:0];
                 issued_count_mem <= issued_count_mem + 1'b1;
                 burst_issued_mem <= burst_issued_mem + 1'b1;
                 if (burst_issued_mem + 1'b1 == burst_target_mem) begin

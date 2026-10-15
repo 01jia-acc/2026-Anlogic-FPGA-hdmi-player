@@ -1,6 +1,8 @@
 `timescale 1ns/1ps
 // Real scheduler and bidirectional frame commit; mock only file/write completion.
-module tb_multi_bmp_cache;
+module tb_multi_bmp_cache #(
+    parameter integer WIPE_FRAMES = 0
+);
     reg clk=0, pixel_clk=0, rst=1;
     always #5 clk=~clk;
     always #17 pixel_clk=~pixel_clk;
@@ -15,7 +17,7 @@ module tb_multi_bmp_cache;
     integer loads=0, i, saved_loads, old_id, bank, boot_count;
     reg saved_toggle;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
-        .LOAD_TIMEOUT_MS(2000), .PCM_ENABLE(1)) dut (
+        .LOAD_TIMEOUT_MS(WIPE_FRAMES > 1 ? 20000 : 2000), .PCM_ENABLE(1)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(1'b0),
         .key_next(key_next), .key_auto(key_auto), .key_audio_mode(1'b1),
         .bmp_width(16'd640), .bmp_height(16'd480),
@@ -25,7 +27,7 @@ module tb_multi_bmp_cache;
         .write_buf_idx(write_bank), .disp_buf_idx(display_bank),
         .write_req_ack(1'b1), .SD_MISO(1'b1)
     );
-    media_display_commit commit (
+    media_display_commit #(.WIPE_FRAMES(WIPE_FRAMES)) commit (
         .src_clk(clk), .rst(rst), .display_valid_src(display_valid),
         .display_index_src(display_bank), .display_image_id_src(image_id),
         .pixel_clk(pixel_clk), .frame_request(frame_req),
@@ -40,14 +42,24 @@ module tb_multi_bmp_cache;
             $fatal(1,"Writing currently displayed bank: image %0d",pix_id);
         if(display_valid && write_bank==display_bank)
             $fatal(1,"Writing requested display bank");
+        if(ack_valid && write_bank==ack_bank)
+            $fatal(1,"Writing bank still protected by display/wipe acknowledgment");
     end
     task frame;
         input integer expected;
+        integer step;
         begin
-            repeat(30) @(negedge pixel_clk);
-            frame_req=1;
-            @(negedge pixel_clk); frame_req=0;
-            repeat(30) @(negedge pixel_clk);
+            // In wipe mode ACK must stay on the old bank until the first
+            // all-new frame. Feed every frame boundary, not just the commit.
+            for(step=0;step < (WIPE_FRAMES > 1 ? WIPE_FRAMES : 1);step=step+1) begin
+                repeat(30) @(negedge pixel_clk);
+                frame_req=1;
+                @(negedge pixel_clk); frame_req=0;
+                repeat(30) @(negedge pixel_clk);
+                if(commit.wipe_active_pix &&
+                   (dut.display_settled || !ack_valid || ack_bank!=commit.reader_old_index_pix))
+                    $fatal(1,"Wipe prematurely released old bank or invalidated ACK");
+            end
             if(!pix_valid || pix_id!==expected[3:0] || !ack_valid ||
                ack_id!==expected[3:0] || ack_bank!==pix_bank)
                 $fatal(1,"Frame/ack mismatch want=%0d got=%0d/%0d",expected,pix_id,ack_id);
@@ -238,8 +250,29 @@ module tb_multi_bmp_cache;
         if(dut.last_error!=8'he0 || image_id!=3 || dut.image_complete[write_bank])
             $fatal(1,"Timed-out demand published an incomplete cache");
         frame(3);
+        // A second key during mixed frames must remain pending until the old
+        // bank is released. Both targets are cached, so loading cannot mask it.
+        if(WIPE_FRAMES > 1) begin
+            resources=16'h000f; boot;
+            next_key; wait(image_id==1);
+            repeat(30) @(negedge pixel_clk);
+            frame_req=1;
+            @(negedge pixel_clk); frame_req=0;
+            repeat(30) @(negedge pixel_clk);
+            next_key;
+            if(!commit.wipe_active_pix || image_id!=1 || pix_id!=1 ||
+               !dut.next_req_pending || ack_id!=0 || dut.display_settled)
+                $fatal(1,"Key during wipe replaced target or lost pending request");
+            for(saved_loads=1;saved_loads<WIPE_FRAMES;saved_loads=saved_loads+1) begin
+                frame_req=1;
+                @(negedge pixel_clk); frame_req=0;
+                repeat(30) @(negedge pixel_clk);
+            end
+            wait(image_id==2); frame(2);
+            if(loads!=4) $fatal(1,"Queued cached switch caused a reload");
+        end
         $display("PASS: next-image prefetch, stable background display/audio, PCM permission on hits, cached navigation during I/O, early keys, 16-image wrap, auto, sparse/single files, failure/timeout");
         $finish;
     end
-    initial begin #10000000; $fatal(1,"Multi-BMP cache test timeout"); end
+    initial begin #30000000; $fatal(1,"Multi-BMP cache test timeout"); end
 endmodule

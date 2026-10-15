@@ -99,6 +99,10 @@ parameter FRAME_PIXELS  = 24'd307200;     // 640*480，单位是 32 bit 像素�
 parameter AUDIO_TEST_ONLY = 0;
 parameter AUDIO_PCM_ENABLE = 1;
 parameter [7:0] AUDIO_VOLUME = 8'd192;
+// 0: hard cut; 1: original black fade-in; 2: true top-to-bottom bank wipe.
+parameter integer TRANSITION_MODE = 2;
+// In wipe mode use a divisor of 480; 16 gives 30 rows per frame (~0.27 s).
+parameter integer TRANSITION_FRAMES = 16;
 
 // 四个帧缓冲区的首地址。这里是 SDRAM 应用接口的“字地址”，不是字节地址。
 //   Buffer 0：0              ~ 307199
@@ -191,6 +195,8 @@ wire [1:0] display_ack_bank;
 wire display_ack_valid;
 wire        video_display_valid;
 wire        video_display_changed;
+wire [1:0]  video_old_buf_idx;
+wire [ADDR_BITS:0] video_new_words;
 wire        display_commit_toggle;
 reg         video_read_req_d;
 
@@ -333,7 +339,10 @@ always @(posedge video_clk or posedge rst_all) begin
     end
 end
 
-media_display_commit u_display_commit (
+media_display_commit #(
+    .ADDR_WIDTH(ADDR_BITS), .IMAGE_WORDS(FRAME_PIXELS), .FRAME_WIDTH(640),
+    .WIPE_FRAMES(TRANSITION_MODE == 2 ? TRANSITION_FRAMES : 0)
+) u_display_commit (
     .src_clk(sd_card_clk), .rst(rst_all),
     .display_valid_src(display_valid), .display_index_src(disp_buf_idx),
     .display_image_id_src(display_image_id),
@@ -344,6 +353,8 @@ media_display_commit u_display_commit (
     .display_index_pix(video_disp_buf_idx),
     .display_image_id_pix(video_image_id),
     .display_changed_pix(video_display_changed),
+    .reader_old_index_pix(video_old_buf_idx), .reader_new_words_pix(video_new_words),
+    .wipe_active_pix(),
     .display_ack_valid_src(display_ack_valid), .display_ack_bank_src(display_ack_bank),
     .display_ack_image_id_src(display_ack_image_id),
     .audio_commit_toggle(display_commit_toggle)
@@ -561,7 +572,8 @@ media_frame_reader #(
     .FIFO_MARGIN         (8),
     .BURST_SIZE          (128),
     .BURST_GAP_CYCLES    (12),
-    .MAX_INFLIGHT_BURSTS (2)
+    .MAX_INFLIGHT_BURSTS (2),
+    .REGION_READ_ENABLE (TRANSITION_MODE == 2)
 ) u_media_frame_reader (
     .mem_clk             (ext_mem_clk),
     .mem_rst_n           (~rst_all),
@@ -577,6 +589,8 @@ media_frame_reader #(
     .pix_rst_n           (~rst_all),
     .frame_start         (reader_frame_start),
     .active_index        (video_disp_buf_idx),
+    .old_index           (video_old_buf_idx),
+    .new_words           (video_new_words),
     .pixel_consume       (reader_pixel_consume),
     .pixel_rgb           (reader_pixel_rgb),
     .pixel_valid         (reader_pixel_valid),
@@ -625,12 +639,7 @@ wire osd_de;                     // DE透传，与输出颜色同拍
 wire osd_frame_start;
 wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
-wire [7:0] transition_alpha;
-wire transition_active;
 wire [23:0] transition_rgb;
-wire [15:0] transition_r_mix;
-wire [15:0] transition_g_mix;
-wire [15:0] transition_b_mix;
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
                          (pcm_stream_error != 0) ? pcm_stream_error :
@@ -654,17 +663,20 @@ subtitle_frame_commit u_osd_mem_commit (
     .dst_text(osd_mem_snapshot), .dst_length(), .dst_enable()
 );
 
-// 当前读侧一次只提供一张图。转场在真实显示提交后从黑色淡入新图，
-// Alpha 只在帧边界推进，避免一帧内出现水平撕裂线；OSD 在淡化之后叠加，
-// 因而状态信息始终清晰可见。
-video_fade_in #(.FADE_FRAMES(16)) u_video_fade_in (
+// Wipe is composed by the reader: top rows from the new bank, bottom rows
+// from the protected old bank. One read per output pixel, no RGB multipliers.
+// Keep the original fade-in as a build-time option; OSD stays after transitions.
+generate if (TRANSITION_MODE == 1) begin : g_fade_in
+wire [7:0] transition_alpha;
+wire [15:0] transition_r_mix, transition_g_mix, transition_b_mix;
+video_fade_in #(.FADE_FRAMES(TRANSITION_FRAMES)) u_video_fade_in (
     .clk              (video_clk),
     .rst              (rst_all),
     .frame_start      (osd_frame_start),
     .transition_start (video_display_changed),
     .player_active    (video_display_valid),
     .alpha            (transition_alpha),
-    .active           (transition_active)
+    .active           ()
 );
 
 assign transition_r_mix = vout_data[23:16] * transition_alpha + 16'd255;
@@ -673,6 +685,9 @@ assign transition_b_mix = vout_data[7:0]   * transition_alpha + 16'd255;
 assign transition_rgb = {transition_r_mix[15:8],
                          transition_g_mix[15:8],
                          transition_b_mix[15:8]};
+end else begin : g_reader_transition
+    assign transition_rgb = vout_data;
+end endgenerate
 
 osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(transition_rgb),
