@@ -190,6 +190,7 @@ wire [3:0] display_image_id, video_image_id, display_ack_image_id;
 wire [1:0] display_ack_bank;
 wire display_ack_valid;
 wire        video_display_valid;
+wire        video_display_changed;
 wire        display_commit_toggle;
 reg         video_read_req_d;
 
@@ -342,6 +343,7 @@ media_display_commit u_display_commit (
     .display_valid_pix(video_display_valid),
     .display_index_pix(video_disp_buf_idx),
     .display_image_id_pix(video_image_id),
+    .display_changed_pix(video_display_changed),
     .display_ack_valid_src(display_ack_valid), .display_ack_bank_src(display_ack_bank),
     .display_ack_image_id_src(display_ack_image_id),
     .audio_commit_toggle(display_commit_toggle)
@@ -623,6 +625,12 @@ wire osd_de;                     // DE透传，与输出颜色同拍
 wire osd_frame_start;
 wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
+wire [7:0] transition_alpha;
+wire transition_active;
+wire [23:0] transition_rgb;
+wire [15:0] transition_r_mix;
+wire [15:0] transition_g_mix;
+wire [15:0] transition_b_mix;
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
                          (pcm_stream_error != 0) ? pcm_stream_error :
@@ -645,8 +653,29 @@ subtitle_frame_commit u_osd_mem_commit (
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_mem_snapshot), .dst_length(), .dst_enable()
 );
+
+// 当前读侧一次只提供一张图。转场在真实显示提交后从黑色淡入新图，
+// Alpha 只在帧边界推进，避免一帧内出现水平撕裂线；OSD 在淡化之后叠加，
+// 因而状态信息始终清晰可见。
+video_fade_in #(.FADE_FRAMES(16)) u_video_fade_in (
+    .clk              (video_clk),
+    .rst              (rst_all),
+    .frame_start      (osd_frame_start),
+    .transition_start (video_display_changed),
+    .player_active    (video_display_valid),
+    .alpha            (transition_alpha),
+    .active           (transition_active)
+);
+
+assign transition_r_mix = vout_data[23:16] * transition_alpha + 16'd255;
+assign transition_g_mix = vout_data[15:8]  * transition_alpha + 16'd255;
+assign transition_b_mix = vout_data[7:0]   * transition_alpha + 16'd255;
+assign transition_rgb = {transition_r_mix[15:8],
+                         transition_g_mix[15:8],
+                         transition_b_mix[15:8]};
+
 osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
-    .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(vout_data),
+    .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(transition_rgb),
     .active_index(video_image_id), .auto_enabled(osd_sd_snapshot[8]),
     .error_code(osd_error), .rgb_out(osd_rgb), .de_out(osd_de),
     .osd_active(), .frame_start(osd_frame_start),

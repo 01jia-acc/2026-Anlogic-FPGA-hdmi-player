@@ -14,6 +14,7 @@ module media_display_commit (
     output reg display_valid_pix,
     output reg [1:0] display_index_pix,
     output reg [3:0] display_image_id_pix,
+    output reg display_changed_pix,
     output wire display_ack_valid_src,
     output wire [1:0] display_ack_bank_src,
     output wire [3:0] display_ack_image_id_src,
@@ -55,15 +56,21 @@ module media_display_commit (
             display_valid_pix <= 1'b0;
             display_index_pix <= 2'd0;
             display_image_id_pix <= 4'd0;
+            display_changed_pix <= 1'b0;
             audio_commit_toggle <= 1'b0;
         end else if (frame_request) begin
+            display_changed_pix <= 1'b0;
             display_valid_pix <= snapshot_valid;
             if (snapshot_valid) begin
                 display_index_pix <= snapshot[1:0];
                 display_image_id_pix <= snapshot[5:2];
                 if (!display_valid_pix || display_image_id_pix != snapshot[5:2])
                     audio_commit_toggle <= ~audio_commit_toggle;
+                if (display_valid_pix && display_image_id_pix != snapshot[5:2])
+                    display_changed_pix <= 1'b1;
             end
+        end else begin
+            display_changed_pix <= 1'b0;
         end
     end
 endmodule

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Project Version="3" Minor="2" Path="F:/FPGA_anlu/2026-Anlogic-FPGA-hdmi-player/src/td_project">
+<Project Version="3" Minor="2" Path="D:/AnLu/7_lab_ex_2026_nosoft/fortext/lab_ex4_tf/src/td_project">
     <Project_Created_Time></Project_Created_Time>
     <TD_Version>6.2.168116</TD_Version>
     <Name>lab_ex5_i2s_v1.0</Name>
@@ -421,12 +421,20 @@
                     <Attr Name="CompileOrder" Val="56"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/audio/pcm_stream_buffer.v">
+            <File Path="../user_source/hdl_source/SD/video_fade_in.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="57"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/audio/pcm_stream_buffer.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="58"/>
                 </FileInfo>
             </File>
         </Verilog>
