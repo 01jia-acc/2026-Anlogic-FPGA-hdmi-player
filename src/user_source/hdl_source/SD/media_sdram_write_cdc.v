@@ -5,7 +5,7 @@
 //
 // 用途：把 loader 时钟域（src_clk = sd_card_clk，100MHz）产生的"写 SDRAM
 //       命令"打包，安全搬运到 SDRAM 控制器时钟域（dst_clk = ext_mem_clk，
-//       125MHz）。一条命令 = {地址, 字节掩码, 数据} = 57 位，三组总线作为
+//       50MHz）。一条命令 = {地址, 字节掩码, 数据} = 57 位，三组总线作为
 //       一个整体跨时钟域，避免分别打拍采样造成的"地址与数据错位"。
 //
 // 结构：手写异步 FIFO，原理与工程里 IP 生成的 wfifo/rfifo 完全相同——
@@ -46,7 +46,7 @@ module media_sdram_write_cdc #(
     output wire                  src_full,       // 【输出】对外满标志：提前一格反压给 loader
     output reg                   src_overflow,   // 【输出】真溢出报警：满的时候还来命令
     // ------------------------- dst 域（SDRAM 控制器时钟域）--------------------
-    input  wire                  dst_clk,        // 【输入】目的时钟：接 ext_mem_clk（125MHz）
+    input  wire                  dst_clk,        // 【输入】目的时钟：接 ext_mem_clk（50MHz）
     input  wire                  dst_rst_n,      // 【输入】目的域复位，低有效
     input  wire                  dst_allow,      // 【输入】总线放行：顶层互斥仲裁允许写时才为 1
     output wire                  dst_app_wr_en,  // 【输出】写使能 → SDRAM 控制器 App_wr_en

@@ -16,8 +16,10 @@
 //	Clock information:
 //		Clock name	| Frequency 	| Phase shift
 //		C0        	| 100.000000MHZ	| 0.0000  DEG  
-//		C1        	| 125.000000MHZ	| 0.0000  DEG  
-//		C2        	| 125.000000MHZ	| 180.0000 DEG  
+//		C1        	| 50.000000MHZ	| 0.0000  DEG
+//		C2        	| 50.000000MHZ	| 144.0000 DEG
+// SDRAM: 20 ns 周期，存储器沿比控制器沿晚 8 ns，留 12 ns 回读窗口。
+// SD 卡仍为 100 MHz；视频及 48 kHz 音频由另一 PLL 提供，不受此修改影响。
 ///////////////////////////////////////////////////////////////////////////////
 `timescale 1 ns / 100 fs
 
@@ -65,12 +67,12 @@ module sys_pll (
     .CLKC0_CPHASE(9),
     .CLKC0_FPHASE(0),
     .CLKC1_ENABLE("ENABLE"),
-    .CLKC1_DIV(8),
-    .CLKC1_CPHASE(7),
+    .CLKC1_DIV(20),
+    .CLKC1_CPHASE(19),
     .CLKC1_FPHASE(0),
     .CLKC2_ENABLE("ENABLE"),
-    .CLKC2_DIV(8),
-    .CLKC2_CPHASE(3),
+    .CLKC2_DIV(20),
+    .CLKC2_CPHASE(7),
     .CLKC2_FPHASE(0) 
   ) pll_inst (
     .refclk(refclk),

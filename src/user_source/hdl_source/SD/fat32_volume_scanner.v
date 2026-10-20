@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// FAT32 根目录扫描器：支持 PIC1.BMP~PIC16.BMP 和可选 AUDIO.PCM。
+// FAT32 根目录扫描器：支持 PIC1~PIC16.BMP 和 AUDIO1~AUDIO16.PCM。
 // 支持 MBR/无分区卷，沿根目录 FAT 簇链查找，忽略删除项、目录、卷标和长名项。
 // 资源表按文件编号排列，位 0 对应 PIC1；旧四槽输出保留用于诊断/兼容。
 module fat32_volume_scanner (
@@ -39,14 +39,16 @@ module fat32_volume_scanner (
     output reg  [31:0] resource1_size,
     output reg  [31:0] resource2_size,
     output reg  [31:0] resource3_size,
-    // 可选音频：原始 48 kHz / s16le / mono，根目录 AUDIO.PCM。
-    output reg         audio_resource_valid,
-    output reg  [31:0] audio_cluster,
-    output reg  [31:0] audio_size,
+    // 按文件名编号保存，bit0/低32位对应 AUDIO1.PCM。
+    output reg  [15:0] audio_resource_valid,
+    output reg [511:0] audio_cluster,
+    output reg [511:0] audio_size,
     // 调试观察口：只把扫描器内部状态照出，不参与控制逻辑。
     output wire [3:0]  debug_state,
     output wire [15:0] debug_sector_done_count,
-    output wire [3:0]  debug_resource_valid,
+    output wire [15:0] debug_resource_valid,
+    output wire [31:0] debug_root_crc,
+    output reg [15:0] debug_root_bytes,
     // 给 sd_sector_adapter 的单扇区请求接口。
     output reg         sector_req,
     output reg  [31:0] sector_lba,
@@ -110,9 +112,10 @@ module fat32_volume_scanner (
     // 项，且 512 能被 32 整除，所以每个目录项都不会跨扇区。
     reg [7:0] dir_first_byte;
     reg [7:0] dir_attr;
-    // bit0~bit15 分别表示当前目录项是否仍可能是 PIC1~PIC16.BMP。
-    // 每收到一个文件名字符，就把不匹配的候选位置 0。
-    reg [15:0] dir_name_match;
+    // Parse the common prefix/extension once, then decode the numeric slot.
+    // Avoid 16 feedback comparators per name and overlapping valid-bit writes.
+    reg dir_pic_match;
+    reg [3:0] dir_pic_slot, dir_audio_slot;
     integer name_slot;
     reg [31:0] root_next_cluster;
     reg [31:0] root_clusters_visited;
@@ -126,14 +129,35 @@ module fat32_volume_scanner (
     reg [7:0] dir_size_23_16;
     reg [7:0] dir_size_15_8;
     reg [7:0] dir_size_7_0;
+    // 先锁存完整目录项，再用寄存过的单槽写使能发布资源表。
+    // 避免最后一个 SD 字节、属性判断、编号比较和宽表写入挤在同一拍。
+    reg [31:0] entry_cluster, entry_size;
+    reg [15:0] entry_pic_write, entry_audio_write;
     // 已完整结束的扇区数。把 sector_done 单拍事件变成可被 UART 采样的进度值。
     reg [15:0] sector_done_count;
+    reg [31:0] root_crc;
 
     // 空闲是唯一可接受 scan_start 的状态；其余状态都属于同一笔扫描事务。
     assign scan_busy = (state != ST_IDLE);
     assign debug_state = state;
     assign debug_sector_done_count = sector_done_count;
     assign debug_resource_valid = resource_valid;
+    assign debug_root_crc = ~root_crc;
+
+    // Reflected CRC-32/ISO-HDLC of all received root-directory bytes.
+    // Observation only: no influence on parsing, requests or file selection.
+    function [31:0] crc32_byte;
+        input [31:0] previous;
+        input [7:0] value;
+        reg [31:0] work;
+        integer bit_no;
+        begin
+            work = previous ^ {24'd0,value};
+            for(bit_no=0;bit_no<8;bit_no=bit_no+1)
+                work = (work >> 1) ^ (work[0] ? 32'hedb88320 : 32'd0);
+            crc32_byte = work;
+        end
+    endfunction
 
     // FAT32/BMP 等磁盘格式使用 little-endian；FPGA 总线按高位在左表示，
     // 所以要把低地址字节放到结果的低位。函数只是组合取数，不保存状态。
@@ -178,50 +202,6 @@ module fat32_volume_scanner (
         end
     endfunction
 
-    // 目录项的前 11 字节是 8 字节主名 + 3 字节扩展名；此处只接受固定的
-    // PIC1.BMP~PIC16.BMP，使用8.3短文件名逐字节比较。
-    // 返回文件名的第offset个字符，number从0开始。
-    // 目录项接收时只比较当前字节，因此综合器只需要一组小比较逻辑，
-    // 不再为 16 个目录项同时展开 16 组完整字符串比较器。
-    function [7:0] pic_name_byte;
-        input [3:0] number;
-        input [3:0] offset;
-        begin
-            case (offset)
-                4'd0:    pic_name_byte = "P";
-                4'd1:    pic_name_byte = "I";
-                4'd2:    pic_name_byte = "C";
-                4'd3:    pic_name_byte = number < 9 ? 8'h31 + number : "1";
-                4'd4:    pic_name_byte = number < 9 ? " " : 8'h30 + (number - 9);
-                4'd5,
-                4'd6,
-                4'd7:    pic_name_byte = " ";
-                4'd8:    pic_name_byte = "B";
-                4'd9:    pic_name_byte = "M";
-                4'd10:   pic_name_byte = "P";
-                default: pic_name_byte = 8'h00;
-            endcase
-        end
-    endfunction
-
-    function [7:0] audio_name_byte;
-        input [3:0] offset;
-        begin
-            case (offset)
-                0: audio_name_byte = "A";
-                1: audio_name_byte = "U";
-                2: audio_name_byte = "D";
-                3: audio_name_byte = "I";
-                4: audio_name_byte = "O";
-                5,6,7: audio_name_byte = " ";
-                8: audio_name_byte = "P";
-                9: audio_name_byte = "C";
-                10: audio_name_byte = "M";
-                default: audio_name_byte = 0;
-            endcase
-        end
-    endfunction
-
     // task 只是在当前时序块中复用两次非阻塞赋值；它不代表软件子程序，
     // 综合后仍然只是 state/fs_error 的普通寄存器赋值。
     task finish_with_error;
@@ -247,12 +227,17 @@ module fat32_volume_scanner (
             resource_valid     <= 16'd0;
             resource_clusters <= 0;
             resource_sizes <= 0;
+            entry_cluster <= 0; entry_size <= 0;
+            entry_pic_write <= 0; entry_audio_write <= 0;
             root_next_cluster <= 0;
             root_clusters_visited <= 0;
             audio_resource_valid <= 1'b0;
             audio_cluster <= 0;
             audio_size <= 0;
             dir_audio_match <= 0;
+            dir_pic_match <= 0;
+            dir_pic_slot <= 0;
+            dir_audio_slot <= 0;
             directory_ended <= 0;
             resource0_cluster  <= 32'd0;
             resource1_cluster  <= 32'd0;
@@ -275,7 +260,6 @@ module fat32_volume_scanner (
             root_sector_index  <= 8'd0;
             dir_first_byte     <= 8'd0;
             dir_attr           <= 8'd0;
-            dir_name_match     <= 16'd0;
             dir_cluster_31_24  <= 8'd0;
             dir_cluster_23_16  <= 8'd0;
             dir_cluster_15_8   <= 8'd0;
@@ -285,9 +269,33 @@ module fat32_volume_scanner (
             dir_size_15_8      <= 8'd0;
             dir_size_7_0       <= 8'd0;
             sector_done_count  <= 16'd0;
+            root_crc <= 32'hffffffff;
+            debug_root_bytes <= 0;
         end else begin
             scan_done <= 1'b0;
             sector_req <= 1'b0;
+            entry_pic_write <= 0;
+            entry_audio_write <= 0;
+            for (name_slot=0; name_slot<16; name_slot=name_slot+1) begin
+                if(entry_pic_write[name_slot]) begin
+                    resource_clusters[name_slot*32 +:32] <= entry_cluster;
+                    resource_sizes[name_slot*32 +:32] <= entry_size;
+                    resource_valid[name_slot] <= 1'b1;
+                end
+                if(entry_audio_write[name_slot]) begin
+                    audio_cluster[name_slot*32 +:32] <= entry_cluster;
+                    audio_size[name_slot*32 +:32] <= entry_size;
+                    audio_resource_valid[name_slot] <= 1'b1;
+                end
+            end
+            if(entry_pic_write[0]) begin resource0_cluster<=entry_cluster; resource0_size<=entry_size; end
+            if(entry_pic_write[1]) begin resource1_cluster<=entry_cluster; resource1_size<=entry_size; end
+            if(entry_pic_write[2]) begin resource2_cluster<=entry_cluster; resource2_size<=entry_size; end
+            if(entry_pic_write[3]) begin resource3_cluster<=entry_cluster; resource3_size<=entry_size; end
+            if(state == ST_ROOT_WAIT && sector_valid) begin
+                root_crc <= crc32_byte(root_crc, sector_byte);
+                debug_root_bytes <= debug_root_bytes + 1'b1;
+            end
 
             // sector_done 只有一个时钟宽度；累计后即使 UART 没采到那个瞬间，
             // 仍可判断扫描是否真的完成过扇区。计数到满后饱和，避免回卷。
@@ -315,6 +323,8 @@ module fat32_volume_scanner (
                         audio_size <= 0;
                         directory_ended <= 0;
                         sector_done_count <= 16'd0;
+                        root_crc <= 32'hffffffff;
+                        debug_root_bytes <= 0;
                         state <= ST_READ0_REQ;
                     end
                 end
@@ -432,25 +442,68 @@ module fat32_volume_scanner (
 
                 ST_ROOT_WAIT: begin
                     // 根目录不再等待整个扇区后展开 16 项比较，而是在字节到达时
-                    // 逐项收集：文件名用 dir_name_match，属性/首簇/大小用少量
+                    // 逐项收集：文件名使用类型标志和数字编号，属性/首簇/大小用少量
                     // 寄存器保存。这样把大规模组合多路选择改成 512 个时钟的
                     // 小逻辑重复使用，显著降低 LUT 和布线拥塞。
                     if (sector_valid) begin
                         case (sector_byte_index[4:0])
                             5'd0: begin
                                 dir_first_byte <= sector_byte;
-                                dir_audio_match <= (sector_byte == "A");
+                                dir_audio_match <= sector_byte == "A";
+                                dir_pic_match <= sector_byte == "P";
+                                dir_pic_slot <= 0;
+                                dir_audio_slot <= 0;
                                 if (sector_byte == 0) directory_ended <= 1'b1;
-                                for (name_slot=0; name_slot<16; name_slot=name_slot+1)
-                                    dir_name_match[name_slot] <= (sector_byte == "P");
                             end
-                            5'd1, 5'd2, 5'd3, 5'd4, 5'd5,
-                            5'd6, 5'd7, 5'd8, 5'd9, 5'd10: begin
-                                if (sector_byte != audio_name_byte(sector_byte_index[3:0]))
-                                    dir_audio_match <= 1'b0;
-                                for (name_slot=0; name_slot<16; name_slot=name_slot+1)
-                                    if (sector_byte != pic_name_byte(name_slot[3:0], sector_byte_index[3:0]))
-                                        dir_name_match[name_slot] <= 1'b0;
+                            5'd1: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == "I";
+                                dir_audio_match <= dir_audio_match && sector_byte == "U";
+                            end
+                            5'd2: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == "C";
+                                dir_audio_match <= dir_audio_match && sector_byte == "D";
+                            end
+                            5'd3: begin
+                                dir_pic_match <= dir_pic_match && sector_byte >= "1" && sector_byte <= "9";
+                                dir_pic_slot <= sector_byte[3:0] - 4'd1;
+                                dir_audio_match <= dir_audio_match && sector_byte == "I";
+                            end
+                            5'd4: begin
+                                if(sector_byte != " ") begin
+                                    dir_pic_match <= dir_pic_match && dir_pic_slot == 0 &&
+                                                     sector_byte >= "0" && sector_byte <= "6";
+                                    dir_pic_slot <= 4'd9 + sector_byte[3:0];
+                                end
+                                dir_audio_match <= dir_audio_match && sector_byte == "O";
+                            end
+                            5'd5: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == " ";
+                                dir_audio_match <= dir_audio_match && sector_byte >= "1" && sector_byte <= "9";
+                                dir_audio_slot <= sector_byte[3:0] - 4'd1;
+                            end
+                            5'd6: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == " ";
+                                if(sector_byte != " ") begin
+                                    dir_audio_match <= dir_audio_match && dir_audio_slot == 0 &&
+                                                       sector_byte >= "0" && sector_byte <= "6";
+                                    dir_audio_slot <= 4'd9 + sector_byte[3:0];
+                                end
+                            end
+                            5'd7: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == " ";
+                                dir_audio_match <= dir_audio_match && sector_byte == " ";
+                            end
+                            5'd8: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == "B";
+                                dir_audio_match <= dir_audio_match && sector_byte == "P";
+                            end
+                            5'd9: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == "M";
+                                dir_audio_match <= dir_audio_match && sector_byte == "C";
+                            end
+                            5'd10: begin
+                                dir_pic_match <= dir_pic_match && sector_byte == "P";
+                                dir_audio_match <= dir_audio_match && sector_byte == "M";
                             end
                             5'd11: dir_attr <= sector_byte;
                             5'd20: dir_cluster_23_16 <= sector_byte;
@@ -462,6 +515,9 @@ module fat32_volume_scanner (
                             5'd30: dir_size_23_16    <= sector_byte;
                             5'd31: begin
                                 dir_size_31_24 <= sector_byte;
+                                entry_cluster <= {dir_cluster_31_24, dir_cluster_23_16,
+                                                  dir_cluster_15_8, dir_cluster_7_0};
+                                entry_size <= {sector_byte, dir_size_23_16, dir_size_15_8, dir_size_7_0};
 
                                 // 目录项在本拍已经收齐。最后一个文件大小字节
                                 // 直接使用 sector_byte，避免非阻塞赋值尚未更新
@@ -470,55 +526,13 @@ module fat32_volume_scanner (
                                     dir_first_byte != 8'he5 &&
                                     (dir_attr & 8'h0f) != 8'h0f &&
                                     (dir_attr & 8'h18) == 8'h00) begin
-                                    if (dir_audio_match && !audio_resource_valid) begin
-                                        audio_cluster <= {dir_cluster_31_24, dir_cluster_23_16,
-                                                          dir_cluster_15_8, dir_cluster_7_0};
-                                        audio_size <= {sector_byte, dir_size_23_16,
-                                                       dir_size_15_8, dir_size_7_0};
-                                        audio_resource_valid <= 1'b1;
-                                    end
                                     for (name_slot=0; name_slot<16; name_slot=name_slot+1) begin
-                                        if (dir_name_match[name_slot] && !resource_valid[name_slot]) begin
-                                            resource_clusters[name_slot*32 +: 32] <=
-                                                {dir_cluster_31_24, dir_cluster_23_16,
-                                                 dir_cluster_15_8, dir_cluster_7_0};
-                                            resource_sizes[name_slot*32 +: 32] <=
-                                                {sector_byte, dir_size_23_16, dir_size_15_8, dir_size_7_0};
-                                            resource_valid[name_slot] <= 1'b1;
+                                        if (dir_audio_match && dir_audio_slot == name_slot && !audio_resource_valid[name_slot]) begin
+                                            entry_audio_write[name_slot] <= 1'b1;
                                         end
-                                    end
-                                    if (dir_name_match[0] && !resource_valid[0]) begin
-                                        resource0_cluster <=
-                                            {dir_cluster_31_24, dir_cluster_23_16,
-                                             dir_cluster_15_8, dir_cluster_7_0};
-                                        resource0_size <=
-                                            {sector_byte, dir_size_23_16,
-                                             dir_size_15_8, dir_size_7_0};
-                                        resource_valid[0] <= 1'b1;
-                                    end else if (dir_name_match[1] && !resource_valid[1]) begin
-                                        resource1_cluster <=
-                                            {dir_cluster_31_24, dir_cluster_23_16,
-                                             dir_cluster_15_8, dir_cluster_7_0};
-                                        resource1_size <=
-                                            {sector_byte, dir_size_23_16,
-                                             dir_size_15_8, dir_size_7_0};
-                                        resource_valid[1] <= 1'b1;
-                                    end else if (dir_name_match[2] && !resource_valid[2]) begin
-                                        resource2_cluster <=
-                                            {dir_cluster_31_24, dir_cluster_23_16,
-                                             dir_cluster_15_8, dir_cluster_7_0};
-                                        resource2_size <=
-                                            {sector_byte, dir_size_23_16,
-                                             dir_size_15_8, dir_size_7_0};
-                                        resource_valid[2] <= 1'b1;
-                                    end else if (dir_name_match[3] && !resource_valid[3]) begin
-                                        resource3_cluster <=
-                                            {dir_cluster_31_24, dir_cluster_23_16,
-                                             dir_cluster_15_8, dir_cluster_7_0};
-                                        resource3_size <=
-                                            {sector_byte, dir_size_23_16,
-                                             dir_size_15_8, dir_size_7_0};
-                                        resource_valid[3] <= 1'b1;
+                                        if (dir_pic_match && dir_pic_slot == name_slot && !resource_valid[name_slot]) begin
+                                            entry_pic_write[name_slot] <= 1'b1;
+                                        end
                                     end
                                 end
                             end

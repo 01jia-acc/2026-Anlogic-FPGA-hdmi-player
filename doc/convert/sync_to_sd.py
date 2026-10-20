@@ -31,7 +31,7 @@ def validate_bmp(path):
 
 
 def sync_new_images(source_dir, target_drive, max_count=MAX_IMAGES):
-    """只替换播放器的 PIC 文件；保留 AUDIO.PCM 和其他文件/目录。"""
+    """只替换播放器的 PIC 文件；保留所有 PCM 和其他文件/目录。"""
     if not 1 <= max_count <= MAX_IMAGES:
         raise ValueError("图片数量必须在 1～16 之间")
     source = Path(source_dir).resolve()
@@ -69,7 +69,7 @@ def sync_new_images(source_dir, target_drive, max_count=MAX_IMAGES):
                                   (old.name not in desired_names and
                                    not any(old.samefile(target / name) for name in desired_names))):
                 old.unlink()
-    print(f"已同步 {len(files)} 张图片，保留 AUDIO.PCM 和其他文件。请安全弹出 SD 卡。")
+    print(f"已同步 {len(files)} 张图片，保留所有 PCM 和其他文件。请按 PIC 编号自行匹配音频，并安全弹出 SD 卡。")
     return len(files)
 
 
