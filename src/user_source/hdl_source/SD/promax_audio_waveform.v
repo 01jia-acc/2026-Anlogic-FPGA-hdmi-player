@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// Adapted from lesson 11: 32 decimated samples, frame-swapped banks and peak bar.
+// 32 segmented green columns showing a smoothed audio amplitude envelope.
 // Tap the HDMI bridge AFTER gain/source selection, in the pixel clock domain.
 // Two registered video stages keep the synchronous sample RAM aligned with RGB.
 module promax_audio_waveform #(
@@ -7,7 +7,9 @@ module promax_audio_waveform #(
     parameter integer WAVE_Y=400,
     parameter integer WAVE_WIDTH=512,
     parameter integer WAVE_HEIGHT=64,
-    parameter integer DECIMATE=12
+    parameter integer DECIMATE=24,
+    parameter integer ATTACK_SHIFT=8,
+    parameter integer RELEASE_SHIFT=11
 )(
     input wire clk, rst_n,
     input wire vsync, de,
@@ -24,8 +26,6 @@ module promax_audio_waveform #(
 );
     localparam integer SAMPLE_COUNT=32;
     localparam integer SAMPLE_SPACING=WAVE_WIDTH/SAMPLE_COUNT;
-    localparam integer HALF_HEIGHT=WAVE_HEIGHT/2;
-    localparam [11:0] CENTER_Y=WAVE_Y+HALF_HEIGHT;
     localparam integer DEC_BITS=(DECIMATE>1) ? $clog2(DECIMATE) : 1;
 
     reg vs_q;
@@ -33,9 +33,19 @@ module promax_audio_waveform #(
     reg write_bank, display_bank, display_valid;
     reg [5:0] capture_count;
     reg [DEC_BITS-1:0] decimate_count;
-    reg [15:0] capture_peak, display_peak;
+    reg [15:0] envelope;
     // Unsigned magnitude represents -32768 correctly as +32768.
     wire [15:0] sample_abs=pcm_tap_left[15] ? (~pcm_tap_left+16'd1) : pcm_tap_left;
+    // Every actual HDMI sample updates the envelope, not just the 32 taps.
+    // Rise ~5.3ms, fall ~42.7ms at 48kHz. Round UP the step so quiet audio
+    // eventually reaches zero rather than sticking at a small nonzero value.
+    wire rising=sample_abs>envelope;
+    wire [15:0] difference=rising ? sample_abs-envelope : envelope-sample_abs;
+    wire [16:0] rise_rounded={1'b0,difference}+((1<<ATTACK_SHIFT)-1);
+    wire [16:0] fall_rounded={1'b0,difference}+((1<<RELEASE_SHIFT)-1);
+    wire [15:0] rise_step=rise_rounded>>ATTACK_SHIFT;
+    wire [15:0] fall_step=fall_rounded>>RELEASE_SHIFT;
+    wire [15:0] next_envelope=rising ? envelope+rise_step : envelope-fall_step;
 
     // Single write/read ports without array reset preserve block RAM inference.
     reg [7:0] samples [0:63]; /* fehdl force_ram=1, ram_style="bram" */
@@ -45,14 +55,14 @@ module promax_audio_waveform #(
     wire [4:0] sample_index=relative_x/SAMPLE_SPACING;
     reg [7:0] sample_q;
     always @(posedge clk) begin
-        if(sample_write) samples[{write_bank,capture_count[4:0]}]<=pcm_tap_left[15:8];
+        if(sample_write) samples[{write_bank,capture_count[4:0]}]<=next_envelope[15:8];
         sample_q<=samples[{display_bank,sample_index}];
     end
 
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             vs_q<=1; write_bank<=0; display_bank<=1; display_valid<=0;
-            capture_count<=0; decimate_count<=0; capture_peak<=0; display_peak<=0;
+            capture_count<=0; decimate_count<=0; envelope<=0;
         end else begin
             vs_q<=vsync;
             if(frame_start) begin
@@ -60,17 +70,14 @@ module promax_audio_waveform #(
                     display_bank<=write_bank;
                     write_bank<=~write_bank;
                     display_valid<=1;
-                    display_peak<=capture_peak;
                 end else begin
-                    // An interrupted stream must not leave a stale waveform/meter.
+                    // An interrupted stream must not leave old raised bars.
                     display_valid<=0;
-                    display_peak<=0;
+                    envelope<=0;
                 end
-                capture_count<=0; decimate_count<=0; capture_peak<=0;
+                capture_count<=0; decimate_count<=0;
             end else if(pcm_tap_valid) begin
-                // Peak uses ALL samples in the frame, including decimated-away
-                // transients and samples after the 32-point window is complete.
-                if(sample_abs>capture_peak) capture_peak<=sample_abs;
+                envelope<=next_envelope;
                 if(capture_count<SAMPLE_COUNT) begin
                     if(decimate_count==0) begin
                         capture_count<=capture_count+1'b1;
@@ -84,37 +91,34 @@ module promax_audio_waveform #(
     reg [23:0] rgb1;
     reg [11:0] x1,y1;
     reg vs1,de1,enabled1,valid1,frame1;
-    reg [15:0] peak1;
-    wire [7:0] magnitude=sample_q[7] ? (~sample_q+8'd1) : sample_q;
-    // Constant geometry: default 64px height synthesizes as shifts, no DSP.
-    wire [19:0] amplitude_product=magnitude*HALF_HEIGHT;
-    wire [11:0] amplitude_raw=amplitude_product>>7;
-    wire [11:0] amplitude=amplitude_raw>=HALF_HEIGHT ? HALF_HEIGHT-1 : amplitude_raw;
-    wire [11:0] sample_y=sample_q[7] ? CENTER_Y+amplitude : CENTER_Y-amplitude;
-    wire [27:0] peak_product=peak1*HALF_HEIGHT;
-    wire [11:0] peak_height=peak_product>>15;
+    wire [11:0] column_x=(x1-WAVE_X)%SAMPLE_SPACING;
+    wire [11:0] from_bottom=WAVE_Y+WAVE_HEIGHT-1-y1;
+    // One quiet baseline block, up to four blocks. 4px lit + 4px gap.
+    // At the default 16px column pitch, blocks are 12px wide with 4px gaps.
+    // Compressed thresholds keep ordinary speech/arpeggios visible without
+    // normalizing quiet files to full height: 768 / 2304 / 6144 in PCM units.
+    // These thresholds affect visualization only, never the HDMI audio gain.
+    wire [2:0] blocks=!valid1 ? 3'd1 : sample_q>=24 ? 3'd4 :
+        sample_q>=9 ? 3'd3 : sample_q>=3 ? 3'd2 : 3'd1;
     wire in_wave=enabled1 && de1 && x1>=WAVE_X && x1<WAVE_X+WAVE_WIDTH &&
         y1>=WAVE_Y && y1<WAVE_Y+WAVE_HEIGHT;
-    wire wave_pixel=in_wave && valid1 && y1+12'd1>=sample_y && y1<=sample_y+12'd1;
-    wire axis_pixel=in_wave && y1==CENTER_Y;
-    wire peak_pixel=enabled1 && de1 && valid1 &&
-        x1>=WAVE_X+WAVE_WIDTH+8 && x1<WAVE_X+WAVE_WIDTH+16 &&
-        y1>=WAVE_Y+WAVE_HEIGHT-peak_height && y1<WAVE_Y+WAVE_HEIGHT;
+    wire bar_pixel=in_wave && column_x>=2 && column_x<SAMPLE_SPACING-2 &&
+        from_bottom[11:3]<blocks && from_bottom[2:0]<4;
+    wire [23:0] bar_color=from_bottom[2:0]==3 ? 24'hb8f438 : 24'h20ee70;
 
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             rgb1<=0; x1<=0; y1<=0; vs1<=1; de1<=0;
-            enabled1<=0; valid1<=0; peak1<=0; frame1<=0;
+            enabled1<=0; valid1<=0; frame1<=0;
             rgb_out<=0; out_vs<=1; out_de<=0; out_x<=0; out_y<=0;
             waveform_active<=0; frame_start_out<=0;
         end else begin
             rgb1<=rgb_in; x1<=pixel_x; y1<=pixel_y; vs1<=vsync; de1<=de;
-            enabled1<=enable; valid1<=display_valid; peak1<=display_peak; frame1<=frame_start;
-            rgb_out<=wave_pixel ? 24'h20ff90 : peak_pixel ? 24'hffb020 :
-                axis_pixel ? 24'h406060 : rgb1;
+            enabled1<=enable; valid1<=display_valid; frame1<=frame_start;
+            rgb_out<=bar_pixel ? bar_color : rgb1;
             out_vs<=vs1; out_de<=de1; out_x<=x1; out_y<=y1;
             frame_start_out<=frame1;
-            waveform_active<=wave_pixel || axis_pixel || peak_pixel;
+            waveform_active<=bar_pixel;
         end
     end
 endmodule

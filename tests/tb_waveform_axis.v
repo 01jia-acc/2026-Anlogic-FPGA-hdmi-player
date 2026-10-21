@@ -7,7 +7,9 @@ module tb_waveform_axis;
     reg [11:0] x=0,y=0;
     reg [23:0] rgb=0;
     reg pcm_mode=1,pcm_valid=1;
-    reg signed [15:0] pcm_sample=16384;
+    // Quiet PCM: 2560 becomes 1920 after the real 192/256 HDMI gain.
+    // Raised thresholds must show two blocks instead of the previous three.
+    reg signed [15:0] pcm_sample=2560;
     wire av;
     wire [23:0] left;
     media_hdmi_audio_bridge #(.PCM_ENABLE(1),.VOLUME(192)) audio(
@@ -34,7 +36,7 @@ module tb_waveform_axis;
     reg [23:0] colors[0:4];
     reg [4:0] vp=0,lp=0,up=0;
     reg arm=1,prev_vs=1;
-    integer i,pixels=0,lines=0,frames=0,amplitude=12,peak=12;
+    integer i,pixels=0,lines=0,frames=0,blocks=2;
     reg [23:0] golden;
     always @(posedge clk) begin
         if(rst) begin vp=0;lp=0;up=0;arm=1;prev_vs=vs;end
@@ -42,11 +44,9 @@ module tb_waveform_axis;
             if(vs!=prev_vs) arm=1;
             prev_vs=vs;
             golden=rgb;
-            if(enable && de && x>=64 && x<576 && y>=368 && y<432) begin
-                if(y==400) golden=24'h406060;
-                if(y>=399-amplitude && y<=401-amplitude) golden=24'h20ff90;
-            end
-            if(enable && de && x>=584 && x<592 && y>=432-peak && y<432) golden=24'hffb020;
+            if(enable && de && x>=64 && x<576 && y>=432-blocks*8 && y<432 &&
+                (x-64)%16>=2 && (x-64)%16<14 && (431-y)%8<4)
+                golden=(431-y)%8==3 ? 24'hb8f438 : 24'h20ee70;
             for(i=4;i>0;i=i-1) colors[i]=colors[i-1];
             colors[0]=golden;
             vp={vp[3:0],de};lp={lp[3:0],de && x==639};up={up[3:0],de && arm};
@@ -64,11 +64,13 @@ module tb_waveform_axis;
     integer f,xx,yy;
     initial begin
         repeat(4) @(negedge clk);rst=0;
-        // At 48 kHz fill the 32x12 sample window with the actual 3/4-gain output.
-        repeat(220000) @(negedge clk);
+        // Settle real 48kHz attack, then fill a stable 32x24 sample window.
+        repeat(1000000) @(negedge clk);
+        vs=0;repeat(5) @(negedge clk);vs=1;
+        repeat(420000) @(negedge clk);
         for(f=0;f<3;f=f+1) begin
             @(negedge clk);vs=0;enable=(f!=1);
-            if(f==2) begin amplitude=0;peak=0;end
+            if(f==2) blocks=1;
             repeat(5) @(negedge clk);vs=1;
             for(yy=0;yy<480;yy=yy+1) begin
                 for(xx=0;xx<640;xx=xx+1) begin
@@ -81,11 +83,17 @@ module tb_waveform_axis;
             // Fill with HDMI silence BEFORE the next frame: no valid PCM.
             if(f==0) pcm_valid=0;
             repeat(20) @(negedge clk);
+            if(f==1) begin
+                // Allow the intentionally slow release, then replace old capture.
+                repeat(3000000) @(negedge clk);
+                vs=0;repeat(5) @(negedge clk);vs=1;
+                repeat(420000) @(negedge clk);
+            end
         end
         if(pixels!=3*640*480 || lines!=1440 || frames!=3)
             $fatal(1,"frame counts pixels=%0d lines=%0d frames=%0d",pixels,lines,frames);
         $display("PASS: actual HDMI gain and missing-PCM silence, waveform/subtitle 640x480 RGB, preview hiding, SOF and TLAST");
         $finish;
     end
-    initial begin #100000000; $fatal(1,"AXIS timeout");end
+    initial begin #300000000; $fatal(1,"AXIS timeout");end
 endmodule
