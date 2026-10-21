@@ -99,6 +99,7 @@ parameter FRAME_PIXELS  = 24'd307200;     // 640*480，单位是 32 bit 像素�
 parameter AUDIO_TEST_ONLY = 0;
 parameter AUDIO_PCM_ENABLE = 1;
 parameter [7:0] AUDIO_VOLUME = 8'd192;
+parameter integer AUDIO_WAVEFORM_ENABLE = 1;
 // 0: hard cut; 1: original black fade-in; 2: true top-to-bottom bank wipe.
 parameter integer TRANSITION_MODE = 2;
 // In wipe mode use a divisor of 480; 16 gives 30 rows per frame (~0.27 s).
@@ -691,6 +692,9 @@ wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
 wire [23:0] zoom_rgb;
 wire [23:0] thumbnail_rgb;
+wire [23:0] waveform_rgb;
+wire waveform_vs, waveform_de, waveform_frame_start;
+wire [11:0] waveform_x, waveform_y;
 wire [23:0] subtitle_rgb;
 wire subtitle_vs, subtitle_de;
 wire [23:0] transition_rgb;
@@ -765,14 +769,26 @@ thumbnail_status_osd u_thumbnail_status (
     .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
     .descriptor(display_thumbnail), .rgb_in(zoom_rgb), .rgb_out(thumbnail_rgb)
 );
-// The final text/font RAM reads add TWO clocks to both color and video timing.
+// Lesson waveform above the subtitle band (starts at y=438). Listen to the
+// exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
+// Preview hides the overlay; capture continues so returning shows fresh audio.
+promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
+    .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(thumbnail_rgb),
+    .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23]),
+    .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
+    .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
+    .out_x(waveform_x), .out_y(waveform_y), .frame_start_out(waveform_frame_start),
+    .waveform_active()
+);
+// Waveform and text/font RAM reads each add TWO clocks to RGB and timing.
 // Scroll and text changes commit at the existing OSD VS frame boundary.
 scrolling_subtitle u_scrolling_subtitle (
     .control_clk(clk), .pixel_clk(video_clk), .rst(rst_all),
     .rx_data(uart_rx_data), .rx_valid(uart_rx_valid),
-    .frame_start(osd_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
-    .in_vs(vs), .in_de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
-    .rgb_in(thumbnail_rgb), .out_vs(subtitle_vs), .out_de(subtitle_de),
+    .frame_start(waveform_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
+    .in_vs(waveform_vs), .in_de(waveform_de), .pixel_x(waveform_x), .pixel_y(waveform_y),
+    .rgb_in(waveform_rgb), .out_vs(subtitle_vs), .out_de(subtitle_de),
     .rgb_out(subtitle_rgb), .busy(), .rejected_lines()
 );
 
@@ -950,7 +966,7 @@ sdram U3(
 video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_clk         (video_clk),       // 输入：视频像素时钟
     .I_rst         (rst_all),         // 输入：统一高有效复位
-    .I_vs          (subtitle_vs),     // 与字幕ROM流水线一起延迟两拍
+    .I_vs          (subtitle_vs),     // 与波形及字幕流水线一起延迟四拍
     .I_de          (subtitle_de),
     .I_rgb         (subtitle_rgb),    // 状态、倍率、缩略图与滚动字幕的最终画面
     .O_video_user  (axis_s_user),     // 输出→HDMI IP：帧起始/用户标志
