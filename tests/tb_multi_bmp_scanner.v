@@ -5,6 +5,7 @@ module tb_multi_bmp_scanner;
     wire req, busy, done, audio_valid;
     wire [31:0] lba, audio_cluster, audio_size, partition;
     wire [7:0] error;
+    wire pic10_size_bit5;
     wire [15:0] valid;
     wire [511:0] clusters, sizes;
     wire [31:0] legacy_cluster, legacy_size;
@@ -19,6 +20,7 @@ module tb_multi_bmp_scanner;
         .fs_error(error), .partition_lba(partition), .resource_valid(valid),
         .resource_clusters(clusters), .resource_sizes(sizes),
         .resource0_cluster(legacy_cluster), .resource0_size(legacy_size),
+        .debug_pic10_size_bit5(pic10_size_bit5),
         .audio_resource_valid(audio_valid), .audio_cluster(audio_cluster), .audio_size(audio_size),
         .sector_req(req), .sector_lba(lba), .sector_busy(sector_busy),
         .sector_valid(sector_valid), .sector_byte(sector_byte),
@@ -91,6 +93,13 @@ module tb_multi_bmp_scanner;
             if(kind==3) put32((base+1)*512+127*4,300);
             if(kind==4) disk[(base+127)*512]=0;
             if(kind==5) put32((base+1)*512+7*4,127);
+            // Match the board's exact PIC10 sizes; a later duplicate must
+            // not overwrite the raw-byte diagnostic or accepted metadata.
+            if(kind==6 || kind==7) begin
+                put32((base+7)*512+32+28,kind==6 ? 32'h000e1036 : 32'h000e1016);
+                entry((base+7)*512+9*32,pic_name(10),200,
+                      kind==6 ? 32'h000e1016 : 32'h000e1036);
+            end
         end
     endtask
     always @(negedge clk) begin
@@ -115,6 +124,8 @@ module tb_multi_bmp_scanner;
     end
     task run_case;
         input integer kind, want_error;
+        reg [511:0] held_clusters, held_sizes;
+        reg [15:0] held_valid;
         begin
             @(posedge clk); #1; rst_n=0; start=0; prepare(kind);
             root_requests=0; fat_requests=0;
@@ -134,12 +145,25 @@ module tb_multi_bmp_scanner;
             end
             if(kind==4 && (valid!=0 || fat_requests!=0)) $fatal(1,"Read beyond directory end");
             if(kind==5 && dut.root_clusters_visited!=1024) $fatal(1,"Cycle bound not exercised");
+            if(kind==6 || kind==7) begin
+                if(sizes[9*32 +:32] !== (kind==6 ? 32'h000e1036 : 32'h000e1016) ||
+                   pic10_size_bit5 !== (kind==6))
+                    $fatal(1,"PIC10 raw size-bit/first duplicate diagnostic mismatch");
+            end
+            // The cache reads these tables directly after scan completion.
+            held_clusters=clusters; held_sizes=sizes; held_valid=valid;
+            repeat(64) begin
+                @(negedge clk);
+                if(clusters !== held_clusters || sizes !== held_sizes || valid !== held_valid || req)
+                    $fatal(1,"Scanner changed completed metadata or restarted without start");
+            end
             $display("PASS root case %0d error=%h root sectors=%0d",kind,error,root_requests);
         end
     endtask
     initial begin
         run_case(0,0); run_case(1,0); run_case(2,8'h23);
         run_case(3,8'h23); run_case(4,8'h22); run_case(5,8'h23);
+        run_case(6,0); run_case(7,0);
         $display("PASS: PIC1..16, fragmented root, MBR, EOC, ignored entries, first duplicate, simultaneous FAT done, invalid/cyclic root");
         $finish;
     end

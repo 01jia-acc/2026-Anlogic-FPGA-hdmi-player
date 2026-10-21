@@ -13,7 +13,8 @@ module sd_card_bmp_fat32 #(
     parameter integer LONG_PRESS_MS     = 1000,
     // 一次加载的最长允许时间；超过则发 load_abort 并报错（防坏卡永久卡死）。
     parameter integer LOAD_TIMEOUT_MS   = 5_000,
-    parameter integer PCM_ENABLE = 0
+    parameter integer PCM_ENABLE = 0,
+    parameter integer THUMBNAIL_ENABLE = 0
 ) (
     // ===================== 端口：系统时钟/复位 =====================
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
@@ -25,6 +26,10 @@ module sd_card_bmp_fat32 #(
     output reg pcm_mode,
     output reg zoom_mode,
     output reg [1:0] zoom_level, // 0=0.5x, 1=1x, 2=1.5x, 3=2x
+    // [23]=menu, [22]=transaction epoch, [21:20]=focus bank,
+    // [19:16]=complete banks, [15:0]=logical image ids (not physical banks).
+    output wire [31:0] thumbnail_descriptor,
+    input wire thumbnail_ack_epoch,
 
     // ===================== 端口：按键（低有效原始输入，内部会同步+去抖） =====================
     input  wire        key_next,       // "下一张"按键
@@ -93,7 +98,8 @@ module sd_card_bmp_fat32 #(
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
     output wire        debug_sd_cmd_error_latched,
-    output wire [63:0] debug_load_pipeline
+    output wire [63:0] debug_load_pipeline,
+    output wire [63:0] debug_playlist
 );
 
     // 最多16个目录资源，四个bank只作缓存。文件完成与SDRAM写完同时满足才提交。
@@ -102,6 +108,7 @@ module sd_card_bmp_fat32 #(
     wire [7:0] scan_error, source_load_error;
     wire [15:0] resource_valid;
     wire [511:0] resource_clusters, resource_sizes;
+    wire debug_pic10_size_bit5;
     wire [31:0] resource0_cluster, resource1_cluster, resource2_cluster, resource3_cluster;
     wire [31:0] resource0_size, resource1_size, resource2_size, resource3_size;
     wire [3:0] source_debug_scanner_state, source_debug_resource_valid;
@@ -117,11 +124,18 @@ module sd_card_bmp_fat32 #(
     reg scan_start_pulse, load_start_pulse, load_abort_pulse;
     reg scan_kicked, scan_completed, preload_halted;
     reg [15:0] image_resource_valid;
-    reg [511:0] image_clusters, image_sizes;
+    // Scanner owns the tables and holds them until the next scan/reset.
+    // scan_completed gates all consumers; do not duplicate 1024 table bits here.
+    wire [511:0] image_clusters = {resource_clusters[511:128],
+        resource3_cluster,resource2_cluster,resource1_cluster,resource0_cluster};
+    wire [511:0] image_sizes = {resource_sizes[511:128],
+        resource3_size,resource2_size,resource1_size,resource0_size};
+    reg saved_pic10_size_bit5;
     // 前四槽别名用于原有调试接口。
     wire [31:0] img_cluster1 = image_clusters[63:32];
     reg [4:0] img_found_count;
     reg [3:0] img_idx, load_idx;
+    reg [4:0] load_file_number; // Physical PIC number, captured by the resource lookup.
     reg [3:0] image_complete;
     reg [15:0] bank_image_ids;
     reg [2:0] preload_next_idx;
@@ -159,8 +173,66 @@ module sd_card_bmp_fat32 #(
     reg audio_down_seen, audio_long_marked, zoom_auto_down;
     reg [31:0] audio_hold_count;
     reg [3:0] zoom_image_id;
-    localparam integer LONG_PRESS_CYCLES = (CLK_FREQ_HZ / 1000) * LONG_PRESS_MS;
+    reg thumbnail_mode, thumbnail_epoch;
+    reg [1:0] thumbnail_focus;
+    reg thumbnail_ack1, thumbnail_ack2;
+    reg thumbnail_select;
+    reg [1:0] thumbnail_selected_bank;
+    reg thumbnail_pending;
+    reg [3:0] thumbnail_start;
+    // Preview slots follow playlist order; SDRAM banks remain freely mapped.
+    // Keep the entry window until exit ACK, including selection's commit delay.
+    wire thumbnail_hold = THUMBNAIL_ENABLE &&
+        (thumbnail_mode || thumbnail_epoch!=thumbnail_ack2);
     wire [2:0] preload_limit = img_found_count > 4 ? 3'd4 : img_found_count[2:0];
+    wire [4:0] window_max = img_found_count>4 ? img_found_count-5'd4 : 5'd0;
+    wire [4:0] window_preferred = img_idx>2 ? {1'b0,img_idx}-5'd2 : 5'd0;
+    wire [3:0] window_start = window_preferred>window_max ? window_max[3:0] : window_preferred[3:0];
+    wire [3:0] menu_start = thumbnail_hold ? thumbnail_start : window_start;
+    reg [7:0] thumbnail_banks;
+    reg [15:0] thumbnail_ids;
+    reg [3:0] thumbnail_complete;
+    reg window_missing;
+    reg [3:0] window_load_idx;
+    reg [1:0] window_victim;
+    reg window_victim_valid;
+    reg slot_found;
+    integer slot, bank_scan;
+    always @* begin
+        thumbnail_banks=0; thumbnail_ids=0; thumbnail_complete=0;
+        window_missing=0; window_load_idx=window_start;
+        window_victim=0; window_victim_valid=0; slot_found=0;
+        for(slot=3;slot>=0;slot=slot-1) begin
+            thumbnail_ids[slot*4 +:4]=menu_start+slot;
+            slot_found=0;
+            for(bank_scan=0;bank_scan<4;bank_scan=bank_scan+1) begin
+                if(image_complete[bank_scan] && bank_image_ids[bank_scan*4 +:4]==menu_start+slot && slot<preload_limit) begin
+                    thumbnail_banks[slot*2 +:2]=bank_scan;
+                    thumbnail_complete[slot]=1;
+                end
+                if(image_complete[bank_scan] && bank_image_ids[bank_scan*4 +:4]==window_start+slot)
+                    slot_found=1;
+            end
+            if(slot<preload_limit && !slot_found) begin
+                window_missing=1; window_load_idx=window_start+slot;
+            end
+        end
+        for(bank_scan=3;bank_scan>=0;bank_scan=bank_scan-1)
+            if(bank_scan!=disp_buf_idx && (!display_ack_valid || bank_scan!=display_ack_bank) &&
+               (!image_complete[bank_scan] || bank_image_ids[bank_scan*4 +:4]<window_start ||
+                {1'b0,bank_image_ids[bank_scan*4 +:4]}>={1'b0,window_start}+preload_limit)) begin
+                window_victim=bank_scan; window_victim_valid=1;
+            end
+    end
+    wire thumbnail_ready = thumbnail_epoch==thumbnail_ack2;
+    assign thumbnail_descriptor={thumbnail_banks,thumbnail_mode,thumbnail_epoch,thumbnail_focus,
+        thumbnail_complete,thumbnail_ids};
+    localparam integer LONG_PRESS_CYCLES = (CLK_FREQ_HZ / 1000) * LONG_PRESS_MS;
+    // Confirm/cancel owns this cycle. Simultaneous navigation must not change
+    // the exit packet's target bank after the selection has already been made.
+    wire thumbnail_action = thumbnail_mode && thumbnail_ready &&
+        ((key_audio_stable && audio_down_seen && !audio_long_marked) ||
+         (!key_audio_stable && audio_hold_count>=LONG_PRESS_CYCLES-1 && !audio_long_marked));
     wire write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
     // 双向邮箱确认像素域已切到所请求的帧之后，才允许复用旧显示bank。
     wire display_settled = display_ack_valid && display_ack_bank == disp_buf_idx &&
@@ -195,9 +267,10 @@ module sd_card_bmp_fat32 #(
     end
     wire preload_finished = preload_next_idx >= preload_limit;
     // 仅真正需要读图时让 PCM 结束当前扇区并释放事务入口；缓存命中不暂停音频。
-    wire image_read_needed = !load_busy && !preload_halted &&
+    wire image_read_needed = !thumbnail_hold && !load_busy && !preload_halted &&
         (!preload_finished || (display_valid && display_settled &&
-                              img_found_count > 1 && !cache_hit));
+                              img_found_count > 1 && (THUMBNAIL_ENABLE ?
+                               ((next_req_pending || prev_req_pending) ? !cache_hit : window_missing && window_victim_valid) : !cache_hit)));
     function [4:0] resource_count;
         input [15:0] mask;
         integer i;
@@ -211,6 +284,14 @@ module sd_card_bmp_fat32 #(
     assign debug_load_image_number = {1'b0,load_idx} + 5'd1;
     assign debug_load_cluster = load_cluster_lut;
     assign debug_load_size = load_size_lut;
+    // Raw scanner mask / saved scheduler mask / count / displayed playlist
+    // number / last selected physical PIC number / loader and cache flags.
+    // Transfer this whole word through a mailbox before UART sampling.
+    assign debug_playlist = {resource_valid, image_resource_valid,
+        3'd0, img_found_count,
+        (display_valid ? {4'd0,img_idx}+8'd1 : 8'd0),
+        saved_pic10_size_bit5, resource_sizes[293], debug_pic10_size_bit5, load_file_number,
+        preload_halted, load_busy, load_prepare, image_complete};
     assign display_image_id = img_idx;
     assign debug_auto_enabled = auto_play_en;
     assign state_code = !sd_init_done ? 4'd0 : scan_busy ? 4'd1 :
@@ -248,9 +329,22 @@ module sd_card_bmp_fat32 #(
             zoom_mode<=0; zoom_level<=1; zoom_image_id<=0;
             audio_down_seen<=0; audio_long_marked<=0; audio_hold_count<=0;
             zoom_auto_down<=0;
+            thumbnail_mode<=0; thumbnail_epoch<=0; thumbnail_focus<=0;
+            thumbnail_ack1<=0; thumbnail_ack2<=0;
+            thumbnail_select<=0; thumbnail_selected_bank<=0;
+            thumbnail_pending<=0; thumbnail_start<=0;
         end
         else begin
             next_release_pulse<=0;
+            thumbnail_select<=0;
+            thumbnail_ack1<=thumbnail_ack_epoch; thumbnail_ack2<=thumbnail_ack1;
+            if(thumbnail_pending && !thumbnail_hold && display_valid && display_settled &&
+               !load_busy && preload_finished && !window_missing &&
+               !next_req_pending && !prev_req_pending && !next_release_pulse &&
+               key_audio_stable && !audio_down_seen) begin
+                thumbnail_pending<=0; thumbnail_mode<=1; thumbnail_epoch<=~thumbnail_epoch;
+                thumbnail_start<=window_start; thumbnail_focus<=img_idx-window_start;
+            end
             // Defer short KEY3 action until release: a long press must not
             // switch the audio source on its way into/out of zoom mode.
             if(key_audio_mode_press) audio_down_seen<=1;
@@ -258,25 +352,51 @@ module sd_card_bmp_fat32 #(
                 if(audio_hold_count<LONG_PRESS_CYCLES-1) audio_hold_count<=audio_hold_count+1'b1;
                 else if(!audio_long_marked) begin
                     audio_long_marked<=1;
-                    if(display_valid && display_settled) zoom_mode<=~zoom_mode;
+                    if(thumbnail_mode) begin
+                        if(thumbnail_ready) begin
+                            thumbnail_mode<=0; thumbnail_epoch<=~thumbnail_epoch;
+                            // Exit packet identifies the original image on cancel.
+                            thumbnail_focus<=img_idx-thumbnail_start;
+                        end
+                    end else if(thumbnail_pending) thumbnail_pending<=0;
+                    else if(!thumbnail_hold && display_valid && display_settled)
+                        zoom_mode<=~zoom_mode;
                 end
             end else begin
                 audio_hold_count<=0; audio_long_marked<=0;
                 if(audio_down_seen) begin
                     audio_down_seen<=0;
-                    if(!audio_long_marked && PCM_ENABLE) pcm_mode<=~pcm_mode;
+                    if(!audio_long_marked) begin
+                        if(THUMBNAIL_ENABLE && thumbnail_mode) begin
+                            if(thumbnail_ready && thumbnail_complete[thumbnail_focus]) begin
+                                thumbnail_selected_bank<=thumbnail_banks[thumbnail_focus*2 +:2];
+                                thumbnail_select<=1;
+                                thumbnail_mode<=0; thumbnail_epoch<=~thumbnail_epoch;
+                                zoom_level<=1;
+                            end
+                        end else if(THUMBNAIL_ENABLE && zoom_mode) begin
+                            if(!thumbnail_hold && display_valid && display_settled &&
+                               (!load_busy || !load_is_demand)) begin
+                                thumbnail_pending<=~thumbnail_pending;
+                            end
+                        end else if(PCM_ENABLE) pcm_mode<=~pcm_mode;
+                    end
                 end
             end
             if(key_next_press) next_down_seen<=1;
             if(key_next_stable && next_down_seen) begin
                 next_down_seen<=0;
-                if(zoom_mode) begin if(zoom_level<3) zoom_level<=zoom_level+1'b1; end
+                if(thumbnail_mode) begin
+                    if(thumbnail_ready && !thumbnail_action) thumbnail_focus<=thumbnail_focus+1'b1;
+                end else if(zoom_mode) begin if(zoom_level<3) zoom_level<=zoom_level+1'b1; end
                 else next_release_pulse<=1;
             end
             if(key_auto_press && zoom_mode) zoom_auto_down<=1;
             if(key_auto_stable && zoom_auto_down) begin
                 zoom_auto_down<=0;
-                if(zoom_mode && zoom_level>0) zoom_level<=zoom_level-1'b1;
+                if(thumbnail_mode) begin
+                    if(thumbnail_ready && !thumbnail_action) thumbnail_focus<=thumbnail_focus-1'b1;
+                end else if(zoom_mode && zoom_level>0) zoom_level<=zoom_level-1'b1;
             end
             if(img_idx!=zoom_image_id) begin zoom_image_id<=img_idx; zoom_level<=1; end
         end
@@ -287,7 +407,7 @@ module sd_card_bmp_fat32 #(
         .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
         .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
         .pcm_play_enable(scan_completed && load_prepare == 0 && !image_read_needed &&
-                         (preload_halted || preload_finished)),
+                         (preload_halted || preload_finished || thumbnail_hold)),
         // ---- 扫描事务：顶层发脉冲，source 回报 busy/结果 ----
         .scan_start(scan_start_pulse), .scan_busy(scan_busy),
         .scan_done(scan_done), .scan_error(scan_error),
@@ -315,6 +435,7 @@ module sd_card_bmp_fat32 #(
         .debug_sector_active(source_debug_sector_active),
         .debug_sector_done_count(source_debug_sector_done_count),
         .debug_resource_valid(source_debug_resource_valid),
+        .debug_pic10_size_bit5(debug_pic10_size_bit5),
         .debug_sd_state(source_debug_sd_state),
         .debug_sd_cmd_error(source_debug_sd_cmd_error),
         .debug_sd_cmd_error_latched(source_debug_sd_cmd_error_latched),
@@ -326,8 +447,9 @@ module sd_card_bmp_fat32 #(
         if(rst) begin
             scan_start_pulse<=0; load_start_pulse<=0; load_abort_pulse<=0;
             scan_kicked<=0; scan_completed<=0; preload_halted<=0;
-            image_resource_valid<=0; image_clusters<=0; image_sizes<=0;
+            image_resource_valid<=0; saved_pic10_size_bit5<=0;
             img_found_count<=0; img_idx<=0; load_idx<=0;
+            load_file_number<=0;
             image_complete<=0; bank_image_ids<=0; preload_next_idx<=0;
             load_is_demand<=0; load_is_prefetch<=0; victim_cursor<=0;
             write_buf_idx<=0; disp_buf_idx<=0; display_valid<=0;
@@ -344,6 +466,8 @@ module sd_card_bmp_fat32 #(
             if(!sd_init_done) begin
                 scan_kicked<=0; scan_completed<=0; display_valid<=0;
                 image_complete<=0; img_found_count<=0; image_resource_valid<=0;
+                saved_pic10_size_bit5<=0;
+                load_file_number<=0;
                 preload_next_idx<=0; preload_halted<=0; load_busy<=0;
                 load_prepare<=0;
                 source_done_seen<=0; write_done_seen<=0;
@@ -355,16 +479,14 @@ module sd_card_bmp_fat32 #(
                 if(scan_done) begin
                     scan_completed<=1;
                     image_resource_valid<=resource_valid;
-                    image_clusters<={resource_clusters[511:128],
-                        resource3_cluster,resource2_cluster,resource1_cluster,resource0_cluster};
-                    image_sizes<={resource_sizes[511:128],
-                        resource3_size,resource2_size,resource1_size,resource0_size};
+                    saved_pic10_size_bit5<=resource_sizes[293];
                     img_found_count<=resource_count(resource_valid);
                     last_error<=scan_error;
                 end
                 if(load_busy) begin
                     if(load_prepare == 1) begin
                         if(image_resource_valid[lookup_slot] && lookup_image == load_idx) begin
+                            load_file_number <= {1'b0,lookup_slot}+5'd1;
                             load_cluster_lut <= image_clusters[lookup_slot*32 +:32];
                             load_size_lut <= image_sizes[lookup_slot*32 +:32];
                             load_prepare <= 2;
@@ -406,7 +528,8 @@ module sd_card_bmp_fat32 #(
                 end else load_timeout_cnt<=0;
 
                 if(scan_completed && img_found_count != 0) begin
-                    if(next_release_pulse) next_req_pending<=1;
+                    if(thumbnail_hold) begin next_req_pending<=0; prev_req_pending<=0; end
+                    else if(next_release_pulse) next_req_pending<=1;
                     if(key_auto_press && !zoom_mode) key_auto_down_seen<=1;
                     if(zoom_mode) begin
                         long_press_cnt<=0; long_press_marked<=0; key_auto_down_seen<=0;
@@ -431,7 +554,17 @@ module sd_card_bmp_fat32 #(
                         else auto_cnt<=auto_cnt+1'b1;
                     end else auto_cnt<=0;
 
-                    if(!load_busy && !preload_halted && preload_next_idx<preload_limit) begin
+                    // The menu reads ALL completed banks. Freeze replacement
+                    // until the reader acknowledges the exit descriptor, not
+                    // merely until the control-side menu bit goes low.
+                    if(thumbnail_select) begin
+                        disp_buf_idx<=thumbnail_selected_bank;
+                        img_idx<=bank_image_ids[thumbnail_selected_bank*4 +:4];
+                        next_req_pending<=0; prev_req_pending<=0;
+                    end else if(thumbnail_hold) begin
+                        // Entry waits for a complete, idle cache window.
+                        // All four mapped banks stay protected through exit ACK.
+                    end else if(!load_busy && !preload_halted && preload_next_idx<preload_limit) begin
                         if(source_ready) begin
                             load_idx<={1'b0,preload_next_idx};
                             write_buf_idx<=preload_next_idx[1:0];
@@ -462,10 +595,13 @@ module sd_card_bmp_fat32 #(
                         end
                     end else if(!load_busy && preload_finished && !preload_halted &&
                                 display_valid && display_settled && img_found_count>1 &&
-                                !next_req_pending && !prev_req_pending && !cache_hit && source_ready) begin
-                        // 显示当前图片时提前读下一张；读完只发布缓存，不自动换画面。
-                        load_idx<=next_idx; write_buf_idx<=victim_bank;
-                        image_complete[victim_bank]<=0;
+                                !next_req_pending && !prev_req_pending &&
+                                (THUMBNAIL_ENABLE ? window_missing && window_victim_valid : !cache_hit) && source_ready) begin
+                        // Fill missing window members; legacy mode prefetches next.
+                        // Completion publishes cache only, never changes display.
+                        load_idx<=THUMBNAIL_ENABLE ? window_load_idx : next_idx;
+                        write_buf_idx<=THUMBNAIL_ENABLE ? window_victim : victim_bank;
+                        image_complete[THUMBNAIL_ENABLE ? window_victim : victim_bank]<=0;
                         load_is_demand<=0; load_is_prefetch<=1;
                         load_prepare<=1; lookup_slot<=0; lookup_image<=0; load_busy<=1;
                         source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;

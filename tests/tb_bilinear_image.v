@@ -177,6 +177,22 @@ module tb_bilinear_image #(
                 $fatal(1,"Invalid/truncated image published: error=%h want=%h",source_error,error_code);
         end
     endtask
+    // Board log: PIC10's directory size is 32 bytes shorter than PIC1..9,
+    // header never accepted, and source returns ERR_TRUNCATED after draining.
+    // Check this failure cannot emit even a partial frame into SDRAM.
+    task short_directory_size;
+        begin
+            boot;make_header(WIDTH,HEIGHT,0);
+            file_size=bytes-32;
+            begin_file;send_bytes(file_size);
+            wait(source_done);repeat(8) @(posedge clk);
+            if(source_error!=8'h37 || dut.decoder_header_accepted ||
+               outputs || writes || commits || complete[2] || loader_busy)
+                $fatal(1,"Short directory file wrote pixels or failed to reject: error=%h outputs=%0d writes=%0d",
+                    source_error,outputs,writes);
+            $display("PASS: directory size short by 32 bytes rejects header with E=37 and emits zero SDRAM writes");
+        end
+    endtask
     initial begin
         force dut.sd_init_done=1'b1;
         force dut.streamer_file_busy=1'b0;
@@ -198,6 +214,7 @@ module tb_bilinear_image #(
             good_image(320,240,0);good_image(800,600,0);good_image(1920,1080,0);
         end
         bad_image(7,5,1,8'h37);bad_image(1921,1,0,8'h32);
+        short_directory_size;
         // Abort while interpolation is active; restart with a different image.
         boot;make_header(2,2,0);begin_file;send_bytes(bytes);
         wait(dut.u_scaler.state==9);

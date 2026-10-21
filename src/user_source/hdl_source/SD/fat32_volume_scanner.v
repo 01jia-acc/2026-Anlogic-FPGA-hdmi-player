@@ -47,6 +47,7 @@ module fat32_volume_scanner (
     output wire [3:0]  debug_state,
     output wire [15:0] debug_sector_done_count,
     output wire [3:0]  debug_resource_valid,
+    output reg         debug_pic10_size_bit5,
     // 给 sd_sector_adapter 的单扇区请求接口。
     output reg         sector_req,
     output reg  [31:0] sector_lba,
@@ -284,6 +285,7 @@ module fat32_volume_scanner (
             dir_size_23_16     <= 8'd0;
             dir_size_15_8      <= 8'd0;
             dir_size_7_0       <= 8'd0;
+            debug_pic10_size_bit5 <= 1'b0;
             sector_done_count  <= 16'd0;
         end else begin
             scan_done <= 1'b0;
@@ -314,6 +316,7 @@ module fat32_volume_scanner (
                         audio_cluster <= 0;
                         audio_size <= 0;
                         directory_ended <= 0;
+                        debug_pic10_size_bit5 <= 1'b0;
                         sector_done_count <= 16'd0;
                         state <= ST_READ0_REQ;
                     end
@@ -457,7 +460,16 @@ module fat32_volume_scanner (
                             5'd21: dir_cluster_31_24 <= sector_byte;
                             5'd26: dir_cluster_7_0  <= sector_byte;
                             5'd27: dir_cluster_15_8 <= sector_byte;
-                            5'd28: dir_size_7_0      <= sector_byte;
+                            5'd28: begin
+                                dir_size_7_0 <= sector_byte;
+                                // Capture the raw directory-entry bit that distinguishes
+                                // the expected PIC10 size 0x...1036 from 0x...1016.
+                                if (!directory_ended && dir_name_match[9] && !resource_valid[9] &&
+                                    dir_first_byte != 8'h00 && dir_first_byte != 8'he5 &&
+                                    (dir_attr & 8'h0f) != 8'h0f &&
+                                    (dir_attr & 8'h18) == 8'h00)
+                                    debug_pic10_size_bit5 <= sector_byte[5];
+                            end
                             5'd29: dir_size_15_8     <= sector_byte;
                             5'd30: dir_size_23_16    <= sector_byte;
                             5'd31: begin

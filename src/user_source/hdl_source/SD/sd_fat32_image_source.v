@@ -112,6 +112,7 @@ module sd_fat32_image_source #(
     output wire        debug_sector_active,
     output wire [15:0] debug_sector_done_count,
     output wire [3:0]  debug_resource_valid,
+    output wire        debug_pic10_size_bit5,
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
     output wire        debug_sd_cmd_error_latched,
@@ -484,6 +485,7 @@ module sd_fat32_image_source #(
         .debug_state          (scanner_debug_state),
         .debug_sector_done_count(scanner_debug_sector_done_count),
         .debug_resource_valid (scanner_debug_resource_valid),
+        .debug_pic10_size_bit5(debug_pic10_size_bit5),
         // 扇区通道（scanner 侧，经仲裁 mux 接共享通道）
         .sector_req           (scanner_sector_req),
         .sector_lba           (scanner_sector_lba),

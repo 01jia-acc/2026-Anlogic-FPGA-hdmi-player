@@ -30,6 +30,7 @@ module uart_debug_logger #(
     input wire [4:0] load_image_number,
     input wire [31:0] load_cluster, load_size,
     input wire [63:0] load_pipeline,
+    input wire [63:0] playlist_snapshot, // Already transferred into clk domain.
     output wire       tx
 );
     localparam integer LOG_INTERVAL_CYCLES =
@@ -38,12 +39,16 @@ module uart_debug_logger #(
     // P=1 I=1 T=1 B=1 D=0 E=00 V=0 S=2 A=1 L=00000000 C=000 Q=06 X=0 F=0 N=0000 R=00\r\n
     // J为加载的播放序号（十六进制、从1开始），K为首簇，Z为文件字节数。
     // H is the live pipeline snapshot, frozen by the scheduler on load abort.
-    localparam integer MESSAGE_LENGTH = 126;
+    // M=raw 16-file mask, U=saved mask, G=count, O=current playlist number,
+    // Y[4:0]=last physical PIC number; Y[7:5]=PIC10 size bit5 at
+    // saved table / scanner table / raw directory-byte capture respectively.
+    // W={halted,busy,prepare[1:0],complete[3:0]}.
+    localparam integer MESSAGE_LENGTH = 160;
 
     reg [31:0] interval_count;
     reg        boot_pending;
     reg        message_active;
-    reg [6:0]  message_index;
+    reg [7:0]  message_index;
     reg        tx_start;
 
     reg        snap_pll_ready;
@@ -65,6 +70,7 @@ module uart_debug_logger #(
     reg [4:0] snap_load_image_number;
     reg [31:0] snap_load_cluster, snap_load_size;
     reg [63:0] snap_load_pipeline;
+    reg [63:0] snap_playlist;
 
     wire       tx_busy;
     wire [7:0] tx_byte;
@@ -80,7 +86,7 @@ module uart_debug_logger #(
     endfunction
 
     function [7:0] message_byte;
-        input [6:0] index;
+        input [7:0] index;
         begin
             case (index)
                 7'd0:  message_byte = "P";
@@ -191,13 +197,61 @@ module uart_debug_logger #(
                 7'd105: message_byte = " ";
                 7'd106: message_byte = "H";
                 7'd107: message_byte = "=";
-                7'd124: message_byte = 8'h0d;
-                7'd125: message_byte = 8'h0a;
-                default: begin
-                    if(index>=108 && index<=123)
-                        message_byte = hex_ascii(snap_load_pipeline[(123-index)*4 +:4]);
-                    else message_byte = " ";
-                end
+                8'd124: message_byte = " ";
+                8'd125: message_byte = "M";
+                8'd126: message_byte = "=";
+                8'd131: message_byte = " ";
+                8'd132: message_byte = "U";
+                8'd133: message_byte = "=";
+                8'd138: message_byte = " ";
+                8'd139: message_byte = "G";
+                8'd140: message_byte = "=";
+                8'd143: message_byte = " ";
+                8'd144: message_byte = "O";
+                8'd145: message_byte = "=";
+                8'd148: message_byte = " ";
+                8'd149: message_byte = "Y";
+                8'd150: message_byte = "=";
+                8'd153: message_byte = " ";
+                8'd154: message_byte = "W";
+                8'd155: message_byte = "=";
+                8'd158: message_byte = 8'h0d;
+                8'd159: message_byte = 8'h0a;
+                // Constant slices avoid index subtractors and variable barrel
+                // shifters for every diagnostic field on this small FPGA.
+                8'd108: message_byte = hex_ascii(snap_load_pipeline[60 +:4]);
+                8'd109: message_byte = hex_ascii(snap_load_pipeline[56 +:4]);
+                8'd110: message_byte = hex_ascii(snap_load_pipeline[52 +:4]);
+                8'd111: message_byte = hex_ascii(snap_load_pipeline[48 +:4]);
+                8'd112: message_byte = hex_ascii(snap_load_pipeline[44 +:4]);
+                8'd113: message_byte = hex_ascii(snap_load_pipeline[40 +:4]);
+                8'd114: message_byte = hex_ascii(snap_load_pipeline[36 +:4]);
+                8'd115: message_byte = hex_ascii(snap_load_pipeline[32 +:4]);
+                8'd116: message_byte = hex_ascii(snap_load_pipeline[28 +:4]);
+                8'd117: message_byte = hex_ascii(snap_load_pipeline[24 +:4]);
+                8'd118: message_byte = hex_ascii(snap_load_pipeline[20 +:4]);
+                8'd119: message_byte = hex_ascii(snap_load_pipeline[16 +:4]);
+                8'd120: message_byte = hex_ascii(snap_load_pipeline[12 +:4]);
+                8'd121: message_byte = hex_ascii(snap_load_pipeline[8 +:4]);
+                8'd122: message_byte = hex_ascii(snap_load_pipeline[4 +:4]);
+                8'd123: message_byte = hex_ascii(snap_load_pipeline[0 +:4]);
+                8'd127: message_byte = hex_ascii(snap_playlist[60 +:4]);
+                8'd128: message_byte = hex_ascii(snap_playlist[56 +:4]);
+                8'd129: message_byte = hex_ascii(snap_playlist[52 +:4]);
+                8'd130: message_byte = hex_ascii(snap_playlist[48 +:4]);
+                8'd134: message_byte = hex_ascii(snap_playlist[44 +:4]);
+                8'd135: message_byte = hex_ascii(snap_playlist[40 +:4]);
+                8'd136: message_byte = hex_ascii(snap_playlist[36 +:4]);
+                8'd137: message_byte = hex_ascii(snap_playlist[32 +:4]);
+                8'd141: message_byte = hex_ascii(snap_playlist[28 +:4]);
+                8'd142: message_byte = hex_ascii(snap_playlist[24 +:4]);
+                8'd146: message_byte = hex_ascii(snap_playlist[20 +:4]);
+                8'd147: message_byte = hex_ascii(snap_playlist[16 +:4]);
+                8'd151: message_byte = hex_ascii(snap_playlist[12 +:4]);
+                8'd152: message_byte = hex_ascii(snap_playlist[8 +:4]);
+                8'd156: message_byte = hex_ascii(snap_playlist[4 +:4]);
+                8'd157: message_byte = hex_ascii(snap_playlist[0 +:4]);
+                default: message_byte = " ";
             endcase
         end
     endfunction
@@ -241,6 +295,7 @@ module uart_debug_logger #(
             snap_sector_done_count <= 16'd0;
             snap_load_image_number<=0; snap_load_cluster<=0; snap_load_size<=0;
             snap_load_pipeline<=0;
+            snap_playlist<=0;
         end else begin
             // tx_start 是送给 uart_tx 的寄存器脉冲。由于两个 always 块在同一
             // 个时钟沿使用非阻塞赋值，当前 always 置 tx_start=1 后，uart_tx
@@ -273,6 +328,7 @@ module uart_debug_logger #(
                     snap_load_image_number<=load_image_number;
                     snap_load_cluster<=load_cluster; snap_load_size<=load_size;
                     snap_load_pipeline<=load_pipeline;
+                    snap_playlist<=playlist_snapshot;
                     message_index      <= 7'd0;
                     message_active     <= 1'b1;
                     boot_pending       <= 1'b0;

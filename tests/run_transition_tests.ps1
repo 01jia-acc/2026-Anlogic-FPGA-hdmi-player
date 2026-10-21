@@ -10,7 +10,7 @@ $sources = @(Get-ChildItem "$rtl/SD/*.v" | Where-Object Name -ne 'sdram.v' | For
 $sources += @(Get-ChildItem "$rtl/audio/*.v" | ForEach-Object FullName)
 $sources += "$rtl/IP/afifo_32_16_256.v"
 $sources += "$rtl/top_tf_hdmi_audio.v"
-$benches = @('tb_image_zoom', 'tb_video_wipe', 'tb_video_fade_in', 'tb_four_bank_memory', 'tb_four_buffer_audio', 'tb_multi_bmp_cache')
+$benches = @('tb_thumbnail_control', 'tb_thumbnail_osd', 'tb_image_zoom', 'tb_video_wipe', 'tb_video_fade_in', 'tb_four_bank_memory', 'tb_four_buffer_audio', 'tb_multi_bmp_cache')
 $sources += @($benches | ForEach-Object { Join-Path $PSScriptRoot "$_.v" })
 function Invoke-CheckedSimulation([string]$bench, [string[]]$overrides = @()) {
     $log = @(& (Join-Path $ModelSimBin 'vsim.exe') -c -quiet -suppress 2685,2718 -lib work "work.$bench" @overrides -do 'onbreak {quit -code 1 -f}; onerror {quit -code 1 -f}; run -all; quit -f' 2>&1)
@@ -32,6 +32,7 @@ try {
     Invoke-CheckedSimulation 'tb_multi_bmp_cache' @('-GWIPE_FRAMES=4')
     if ($FullSize) {
         Invoke-CheckedSimulation 'tb_image_zoom' @('-GWIDTH=640', '-GHEIGHT=480', '-GBURST=128', '-GFIFO_DEPTH=512')
+        Invoke-CheckedSimulation 'tb_image_zoom' @('-GWIDTH=640', '-GHEIGHT=480', '-GBURST=128', '-GFIFO_DEPTH=512', '-GSTALLS=1')
         Invoke-CheckedSimulation 'tb_video_wipe' @('-GWIDTH=640', '-GHEIGHT=480', '-GFRAMES=16', '-GBURST=128', '-GFIFO_DEPTH=512')
     }
 } finally {

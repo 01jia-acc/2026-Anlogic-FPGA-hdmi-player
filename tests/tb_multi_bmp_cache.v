@@ -80,10 +80,17 @@ module tb_multi_bmp_cache #(
             for(slot=0;slot<16;slot=slot+1) if(resources[slot]) begin
                 if(logical==expected &&
                    (dut.load_cluster_lut!==clusters[slot*32 +:32] ||
-                    dut.load_size_lut!==sizes[slot*32 +:32]))
+                    dut.load_size_lut!==sizes[slot*32 +:32] ||
+                    dut.debug_playlist[12:8] !== slot+1))
                     $fatal(1,"Wrong file selected: logical=%0d PIC%0d",expected,slot+1);
                 logical=logical+1;
             end
+            if(dut.debug_playlist[63:48] !== resources ||
+               dut.debug_playlist[47:32] !== resources ||
+               dut.debug_playlist[31:24] !== logical)
+                $fatal(1,"Playlist diagnostic mask/count mismatch");
+            if(dut.debug_playlist[15:14] !== {sizes[293], sizes[293]})
+                $fatal(1,"PIC10 saved/scanner size-bit diagnostic mismatch");
             old_id=image_id;
             if(expected[0]) begin
                 write_toggle=~write_toggle;

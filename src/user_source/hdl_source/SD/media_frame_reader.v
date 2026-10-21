@@ -12,6 +12,7 @@ module media_frame_reader #(
     parameter integer DIAG_SYNTH_STREAM = 0,
     parameter integer REGION_READ_ENABLE = 0,
     parameter integer ZOOM_ENABLE = 0,
+    parameter integer THUMBNAIL_ENABLE = 0,
     parameter integer FRAME_WIDTH = 640,
     parameter integer FRAME_HEIGHT = 480
 ) (
@@ -45,7 +46,9 @@ module media_frame_reader #(
     input  wire [1:0]            old_index,
     input  wire [ADDR_WIDTH:0]   new_words,
     input  wire [1:0]            zoom_level,
-    output wire [1:0]            display_zoom_level
+    output wire [1:0]            display_zoom_level,
+    input wire [31:0]            thumbnail_descriptor,
+    output wire [31:0]           display_thumbnail
 );
     localparam [7:0] ERR_NONE          = 8'h00;
     localparam [7:0] ERR_FRAME_OVERRUN = 8'h61;
@@ -81,6 +84,10 @@ module media_frame_reader #(
     reg [ADDR_WIDTH-1:0] burst_base_mem;
     reg [1:0] request_zoom_pix, zoom_sync1_mem, zoom_sync2_mem, reload_zoom_mem, frame_zoom_mem;
     assign display_zoom_level = request_zoom_pix;
+    reg [31:0] thumbnail_pix;
+    reg [12:0] thumbnail_sync1, thumbnail_sync2, thumbnail_reload, thumbnail_mem;
+    assign display_thumbnail=thumbnail_pix;
+    wire thumbnail_active=THUMBNAIL_ENABLE && thumbnail_mem[4];
     localparam integer LINE_AW = FRAME_WIDTH<=2 ? 1 : $clog2(FRAME_WIDTH);
     // Reuse the existing output FIFO. One synchronous row RAM is enough:
     // read a contiguous source row, then sample it into one output row.
@@ -90,7 +97,19 @@ module media_frame_reader #(
     reg [1:0] zoom_state, zoom_x_phase, zoom_y_phase;
     reg [15:0] zoom_row_issued, zoom_row_returned, zoom_x, zoom_y, zoom_source_x;
     reg [ADDR_WIDTH-1:0] zoom_row_base;
-    wire zoom_active = ZOOM_ENABLE && frame_zoom_mem!=1;
+    wire zoom_active = (ZOOM_ENABLE && frame_zoom_mem!=1) || thumbnail_active;
+    // Four 1/4-size previews centered as a 2x2 block. Reuse ONE row RAM:
+    // fetch left source row -> emit left half, fetch right -> emit right half.
+    wire [1:0] thumbnail_slot={zoom_y>=FRAME_HEIGHT/2,zoom_x>=FRAME_WIDTH/2};
+    wire [1:0] thumbnail_bank=thumbnail_mem[5+thumbnail_slot*2 +:2];
+    wire thumbnail_row_valid=thumbnail_mem[thumbnail_slot] &&
+        zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4;
+    wire thumbnail_inside=thumbnail_row_valid &&
+        zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4;
+    wire thumbnail_window=zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4 &&
+        zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4;
+    wire [23:0] thumbnail_rgb=thumbnail_inside ? zoom_line_q :
+        thumbnail_window ? 24'h202830 : 24'h080c10;
     wire zoom_border = frame_zoom_mem==0 &&
         (zoom_x<FRAME_WIDTH/4 || zoom_x>=FRAME_WIDTH*3/4 ||
          zoom_y<FRAME_HEIGHT/4 || zoom_y>=FRAME_HEIGHT*3/4);
@@ -176,9 +195,10 @@ module media_frame_reader #(
                        !external_write_busy &&
                        fifo_reset_count_mem == 0 && fifo_ready_mem[1] && !burst_active_mem &&
                        burst_gap_count_mem == 0 &&
-                       issued_count_mem != IMAGE_WORDS &&
+                       (thumbnail_active || issued_count_mem != IMAGE_WORDS) &&
                        inflight_window_ok_q && (zoom_active ?
-                           (zoom_state==Z_READ && zoom_row_issued<FRAME_WIDTH) : fifo_reservation_ok_q);
+                           (zoom_state==Z_READ && zoom_row_issued<FRAME_WIDTH &&
+                            (!thumbnail_active || thumbnail_row_valid)) : fifo_reservation_ok_q);
     wire issue_allowed = !DIAG_SYNTH_STREAM && reader_busy && burst_active_mem;
     // reader_busy 表示“整帧读取事务仍未完成”，不能直接拿来做 SDRAM
     // 仲裁；否则写侧会被锁住整个读帧，读侧又会等待写侧，形成死锁。
@@ -188,7 +208,8 @@ module media_frame_reader #(
                              fifo_ready_mem[1] && !fifo_reset && !fifo_full;
     wire fifo_write_enable = zoom_active ? zoom_write : DIAG_SYNTH_STREAM ? diag_stream_write :
                              (sdram_rd_valid && !fifo_reset && !fifo_full);
-    wire [31:0] fifo_write_data = zoom_active ? {zoom_border ? 24'd0 : zoom_line_q,8'd0} :
+    wire [31:0] fifo_write_data = thumbnail_active ? {thumbnail_rgb,8'd0} :
+                                  zoom_active ? {zoom_border ? 24'd0 : zoom_line_q,8'd0} :
                                   (DIAG_RETURN_PATTERN || DIAG_SYNTH_STREAM) ?
                                   {8'h00, diag_rgb_mem} : sdram_rd_data;
 
@@ -233,6 +254,7 @@ module media_frame_reader #(
             request_old_index_pix <= 2'd0;
             request_new_words_pix <= IMAGE_WORDS;
             request_zoom_pix <= 1;
+            thumbnail_pix<=0;
             frame_armed_pix <= 1'b0;
             consumed_count_pix <= 0;
             underflow <= 1'b0;
@@ -254,6 +276,7 @@ module media_frame_reader #(
                 request_old_index_pix <= REGION_READ_ENABLE ? old_index : active_index;
                 request_new_words_pix <= REGION_READ_ENABLE ? new_words : IMAGE_WORDS;
                 request_zoom_pix <= ZOOM_ENABLE ? zoom_level : 2'd1;
+                thumbnail_pix<=THUMBNAIL_ENABLE ? thumbnail_descriptor : 32'd0;
                 request_toggle_pix <= ~request_toggle_pix;
                 request_pending_pix <= 1'b0;
                 frame_armed_pix <= 1'b1;
@@ -282,6 +305,7 @@ module media_frame_reader #(
             reload_new_words_mem <= IMAGE_WORDS;
             frame_old_index_mem <= 0; frame_new_words_mem <= IMAGE_WORDS;
             zoom_sync1_mem<=1; zoom_sync2_mem<=1; reload_zoom_mem<=1; frame_zoom_mem<=1;
+            thumbnail_sync1<=0; thumbnail_sync2<=0; thumbnail_reload<=0; thumbnail_mem<=0;
             zoom_state<=Z_READ; zoom_x_phase<=0; zoom_y_phase<=0;
             zoom_row_issued<=0; zoom_row_returned<=0;
             zoom_x<=0; zoom_y<=0; zoom_source_x<=0; zoom_row_base<=0;
@@ -323,6 +347,8 @@ module media_frame_reader #(
             new_words_sync1_mem <= request_new_words_pix;
             new_words_sync2_mem <= new_words_sync1_mem;
             zoom_sync1_mem<=request_zoom_pix; zoom_sync2_mem<=zoom_sync1_mem;
+            thumbnail_sync1<={thumbnail_pix[31:24],thumbnail_pix[23],thumbnail_pix[19:16]};
+            thumbnail_sync2<=thumbnail_sync1;
             app_rd_en <= 1'b0;
             frame_read_done <= 1'b0;
             inflight_window_ok_q <= inflight_window_ok;
@@ -358,6 +384,7 @@ module media_frame_reader #(
                 reload_old_index_mem <= old_index_sync2_mem;
                 reload_new_words_mem <= new_words_sync2_mem;
                 reload_zoom_mem<=zoom_sync2_mem;
+                thumbnail_reload<=thumbnail_sync2;
                 if (reader_busy || !inflight_empty_mem) begin
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
@@ -371,11 +398,12 @@ module media_frame_reader #(
                 frame_old_index_mem <= reload_old_index_mem;
                 frame_new_words_mem <= reload_new_words_mem;
                 frame_zoom_mem<=reload_zoom_mem;
+                thumbnail_mem<=thumbnail_reload;
                 zoom_state<=Z_READ; zoom_x_phase<=0; zoom_y_phase<=0;
                 zoom_row_issued<=0; zoom_row_returned<=0; zoom_x<=0; zoom_y<=0;
-                zoom_source_x<=reload_zoom_mem==2 ? FRAME_WIDTH/6 :
+                zoom_source_x<=thumbnail_reload[4] ? 0 : reload_zoom_mem==2 ? FRAME_WIDTH/6 :
                     reload_zoom_mem==3 ? FRAME_WIDTH/4 : 0;
-                zoom_row_base<=reload_zoom_mem==2 ? (FRAME_HEIGHT/6)*FRAME_WIDTH :
+                zoom_row_base<=thumbnail_reload[4] ? 0 : reload_zoom_mem==2 ? (FRAME_HEIGHT/6)*FRAME_WIDTH :
                     reload_zoom_mem==3 ? (FRAME_HEIGHT/4)*FRAME_WIDTH : 0;
                 issued_count_mem <= 0;
                 returned_count_mem <= 0;
@@ -394,8 +422,9 @@ module media_frame_reader #(
 
             if (start_burst) begin
                 // Choose only between bursts; no bank jump inside a burst.
-                burst_base_mem <= bank_base((REGION_READ_ENABLE &&
-                    issued_count_mem >= frame_new_words_mem) ? frame_old_index_mem : reader_index);
+                burst_base_mem <= bank_base(thumbnail_active ? thumbnail_bank :
+                    (REGION_READ_ENABLE && issued_count_mem >= frame_new_words_mem) ?
+                    frame_old_index_mem : reader_index);
                 burst_active_mem <= 1'b1;
                 burst_issued_mem <= 0;
                 burst_target_mem <= next_burst_words[BURST_COUNT_W-1:0];
@@ -432,19 +461,28 @@ module media_frame_reader #(
 
             if(zoom_active && reader_busy && !reload_pending_mem &&
                request_sync2_mem==request_seen_mem) begin
-                if(zoom_state==Z_ADDRESS && zoom_room && !fifo_reset) zoom_state<=Z_PUSH;
+                if(thumbnail_active && zoom_state==Z_READ && !thumbnail_row_valid)
+                    zoom_state<=Z_ADDRESS;
+                // Empty thumbnail rows can emit immediately (no SDRAM delay).
+                // Respect the FIFO's internal reset-release pipeline as well.
+                if(zoom_state==Z_ADDRESS && zoom_room && !fifo_reset && fifo_ready_mem[1])
+                    zoom_state<=Z_PUSH;
                 if(zoom_write) begin
                     zoom_state<=Z_ADDRESS;
                     if(zoom_x==FRAME_WIDTH-1) begin
                         zoom_x<=0; zoom_x_phase<=0;
-                        zoom_source_x<=frame_zoom_mem==2 ? FRAME_WIDTH/6 :
+                        zoom_source_x<=thumbnail_active ? 0 : frame_zoom_mem==2 ? FRAME_WIDTH/6 :
                             frame_zoom_mem==3 ? FRAME_WIDTH/4 : 0;
                         if(zoom_y==FRAME_HEIGHT-1) begin
                             reader_busy<=0; frame_read_done<=1;
                         end else begin
                             zoom_y<=zoom_y+1'b1; zoom_state<=Z_READ;
                             zoom_row_issued<=0; zoom_row_returned<=0;
-                            case(frame_zoom_mem)
+                            if(thumbnail_active) begin
+                                if(zoom_y==FRAME_HEIGHT/2-1) zoom_row_base<=0;
+                                else if(zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4-1)
+                                    zoom_row_base<=zoom_row_base+4*FRAME_WIDTH;
+                            end else case(frame_zoom_mem)
                                 0: if(zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4-1)
                                     zoom_row_base<=zoom_row_base+2*FRAME_WIDTH;
                                 2: if(zoom_y_phase>=1) begin
@@ -456,7 +494,13 @@ module media_frame_reader #(
                         end
                     end else begin
                         zoom_x<=zoom_x+1'b1;
-                        case(frame_zoom_mem)
+                        if(thumbnail_active) begin
+                            if(zoom_x==FRAME_WIDTH/2-1) begin
+                                zoom_state<=Z_READ; zoom_row_issued<=0; zoom_row_returned<=0;
+                                zoom_source_x<=0;
+                            end else if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
+                                zoom_source_x<=zoom_source_x+3'd4;
+                        end else case(frame_zoom_mem)
                             0: if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
                                 zoom_source_x<=zoom_source_x+2'd2;
                             2: if(zoom_x_phase>=1) begin
@@ -520,4 +564,18 @@ module media_frame_reader #(
         end
     end
 
+endmodule
+
+// The menu descriptor and existing image commit use separate CDC mailboxes.
+// Do not acknowledge menu exit until the selected image has actually committed.
+// Cancel packets focus the slot containing the original image, so cancel does not
+// need an image switch. Feed the result into the reader's frame-latched input.
+module thumbnail_exit_gate (
+    input wire [31:0] requested, displayed,
+    input wire [3:0] committed_image,
+    output wire [31:0] descriptor
+);
+    wire [3:0] target_image=requested[requested[21:20]*4 +:4];
+    assign descriptor=displayed[23] && !requested[23] &&
+        committed_image!=target_image ? displayed : requested;
 endmodule
