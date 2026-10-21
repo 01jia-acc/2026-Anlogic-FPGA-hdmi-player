@@ -111,7 +111,10 @@ module tb_image_zoom #(
                     @(negedge pix_clk);
                 end
                 consume=0;
-                repeat(WIDTH/4) @(negedge pix_clk);
+                // A real VGA reader consumes one output word every pixel
+                // clock. Keep the thumbnail check at that rate; any hidden
+                // burst gap will then show up as an underflow.
+                if (!check_thumbnail) repeat(WIDTH/4) @(negedge pix_clk);
             end
             repeat(30) @(negedge pix_clk);
             frames=frames+1;

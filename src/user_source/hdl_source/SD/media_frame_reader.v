@@ -463,7 +463,12 @@ module media_frame_reader #(
                 burst_issued_mem <= burst_issued_mem + 1'b1;
                 if (burst_issued_mem + 1'b1 == burst_target_mem) begin
                     burst_active_mem <= 1'b0;
-                    burst_gap_count_mem <= BURST_GAP_CYCLES;
+                    // At 50 MHz a thumbnail consumes two source words per
+                    // 25 MHz output pixel. The thumbnail path therefore has
+                    // no throughput margin for the normal inter-burst gap.
+                    // Keep the gap for full-frame reads, but run adjacent
+                    // bursts for the thumbnail stream.
+                    burst_gap_count_mem <= thumbnail_active ? 0 : BURST_GAP_CYCLES;
                 end
             end
 
