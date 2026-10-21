@@ -32,6 +32,9 @@ try {
     Invoke-Run 'tb_four_bank_memory' @('-GMEM_HALF_NS=10')
     # New 50 MHz SDRAM domain: sustained full-resolution zoom with FIFO stalls.
     Invoke-Run 'tb_image_zoom' @('-GMEM_HALF_NS=10', '-GWIDTH=640', '-GHEIGHT=480', '-GBURST=128', '-GFIFO_DEPTH=512', '-GSTALLS=1')
+    # Retain coverage of the former centered 160x120 preview layout.
+    Invoke-Run 'tb_image_zoom' @('-GMEM_HALF_NS=10', '-GWIDTH=640', '-GHEIGHT=480', '-GBURST=128', '-GFIFO_DEPTH=512', '-GSTALLS=1', '-GTHUMBNAIL_DIV=4')
+    Invoke-Run 'tb_thumbnail_osd' @('-GTHUMBNAIL_DIV=4')
 } finally {
     Pop-Location
     Write-Output "Simulation logs: $simDir"

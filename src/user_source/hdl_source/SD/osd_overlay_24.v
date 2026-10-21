@@ -54,7 +54,9 @@ endmodule
 
 // The descriptor is the SAME frame-latched packet used by the reader, so
 // focus, logical image labels and completeness cannot disagree with its RGB.
-module thumbnail_status_osd (
+module thumbnail_status_osd #(
+    parameter integer THUMBNAIL_DIV = 2
+) (
     input wire de,
     input wire [11:0] pixel_x, pixel_y,
     input wire [31:0] descriptor,
@@ -62,13 +64,21 @@ module thumbnail_status_osd (
     output reg [23:0] rgb_out
 );
     wire enabled=descriptor[23];
+    localparam integer TILE_W=640/THUMBNAIL_DIV, TILE_H=480/THUMBNAIL_DIV;
+    localparam integer LEFT=320-TILE_W, TOP=240-TILE_H;
+    localparam integer TITLE_X=THUMBNAIL_DIV==2 ? 104 : 160;
+    localparam integer TITLE_Y=THUMBNAIL_DIV==2 ? 4 : 96;
+    localparam integer HELP_X=THUMBNAIL_DIV==2 ? 8 : 160;
+    localparam integer HELP_Y=THUMBNAIL_DIV==2 ? 468 : 384;
+    localparam integer BACK_X=THUMBNAIL_DIV==2 ? 552 : 160;
+    localparam integer BACK_Y=THUMBNAIL_DIV==2 ? 468 : 400;
     wire [1:0] slot={pixel_y>=240,pixel_x>=320};
     wire ready=descriptor[16+slot];
     wire focused=descriptor[21:20]==slot;
     wire [4:0] number={1'b0,descriptor[slot*4 +:4]}+5'd1;
-    wire [11:0] lx=pixel_x-(pixel_x>=320 ? 320 : 160);
-    wire [11:0] ly=pixel_y-(pixel_y>=240 ? 240 : 120);
-    wire inside=pixel_x>=160 && pixel_x<480 && pixel_y>=120 && pixel_y<360;
+    wire [11:0] lx=pixel_x-(pixel_x>=320 ? 320 : LEFT);
+    wire [11:0] ly=pixel_y-(pixel_y>=240 ? 240 : TOP);
+    wire inside=pixel_x>=LEFT && pixel_x<320+TILE_W && pixel_y>=TOP && pixel_y<240+TILE_H;
     reg [11:0] tx, ty;
     reg [7:0] ch;
     reg [34:0] glyph;
@@ -80,14 +90,14 @@ module thumbnail_status_osd (
     localparam [8*10-1:0] BACK="HOLD3 BACK";
     always @* begin
         tx=0; ty=0; ch=" "; text_area=0;
-        if(pixel_x>=160 && pixel_x<264 && pixel_y>=96 && pixel_y<103) begin
-            tx=pixel_x-160; ty=pixel_y-96; text_area=1;
+        if(pixel_x>=TITLE_X && pixel_x<TITLE_X+104 && pixel_y>=TITLE_Y && pixel_y<TITLE_Y+7) begin
+            tx=pixel_x-TITLE_X; ty=pixel_y-TITLE_Y; text_area=1;
             ch=TITLE >> ((12-tx[6:3])*8);
-        end else if(pixel_x>=160 && pixel_x<312 && pixel_y>=384 && pixel_y<391) begin
-            tx=pixel_x-160; ty=pixel_y-384; text_area=1;
+        end else if(pixel_x>=HELP_X && pixel_x<HELP_X+152 && pixel_y>=HELP_Y && pixel_y<HELP_Y+7) begin
+            tx=pixel_x-HELP_X; ty=pixel_y-HELP_Y; text_area=1;
             ch=HELP >> ((18-tx[7:3])*8);
-        end else if(pixel_x>=160 && pixel_x<240 && pixel_y>=400 && pixel_y<407) begin
-            tx=pixel_x-160; ty=pixel_y-400; text_area=1;
+        end else if(pixel_x>=BACK_X && pixel_x<BACK_X+80 && pixel_y>=BACK_Y && pixel_y<BACK_Y+7) begin
+            tx=pixel_x-BACK_X; ty=pixel_y-BACK_Y; text_area=1;
             ch=BACK >> ((9-tx[6:3])*8);
         end else if(inside && lx>=8 && lx<24 && ly>=4 && ly<11) begin
             tx=lx-8; ty=ly-4; text_area=1;
@@ -130,7 +140,8 @@ module thumbnail_status_osd (
         rgb_out=rgb_in;
         if(de && enabled) begin
             if(inside && ly<14) rgb_out=24'h101820;
-            if(inside && (lx<2 || lx>=158 || ly<2 || ly>=118))
+            if(THUMBNAIL_DIV==2 && inside && pixel_y>=464) rgb_out=24'h101820;
+            if(inside && (lx<2 || lx>=TILE_W-2 || ly<2 || ly>=TILE_H-2))
                 rgb_out=focused ? (ready ? 24'hffff00 : 24'hff8000) : 24'h607080;
             if(text_area && tx[2:0]<5 && bits_row[4-tx[2:0]]) rgb_out=24'hffffff;
         end

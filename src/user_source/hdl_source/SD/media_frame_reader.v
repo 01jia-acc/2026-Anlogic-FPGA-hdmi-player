@@ -13,6 +13,7 @@ module media_frame_reader #(
     parameter integer REGION_READ_ENABLE = 0,
     parameter integer ZOOM_ENABLE = 0,
     parameter integer THUMBNAIL_ENABLE = 0,
+    parameter integer THUMBNAIL_DIV = 2,
     parameter integer FRAME_WIDTH = 640,
     parameter integer FRAME_HEIGHT = 480
 ) (
@@ -89,9 +90,13 @@ module media_frame_reader #(
     assign display_thumbnail=thumbnail_pix;
     wire thumbnail_active=THUMBNAIL_ENABLE && thumbnail_mem[4];
     localparam integer LINE_AW = FRAME_WIDTH<=2 ? 1 : $clog2(FRAME_WIDTH);
-    localparam integer THUMBNAIL_ROW_WORDS = FRAME_WIDTH/4;
+    localparam integer THUMBNAIL_ROW_WORDS = FRAME_WIDTH/THUMBNAIL_DIV;
+    localparam integer THUMBNAIL_LEFT = FRAME_WIDTH/2-THUMBNAIL_ROW_WORDS;
+    localparam integer THUMBNAIL_RIGHT = FRAME_WIDTH/2+THUMBNAIL_ROW_WORDS;
+    localparam integer THUMBNAIL_TOP = FRAME_HEIGHT/2-FRAME_HEIGHT/THUMBNAIL_DIV;
+    localparam integer THUMBNAIL_BOTTOM = FRAME_HEIGHT/2+FRAME_HEIGHT/THUMBNAIL_DIV;
     // Reuse the existing output FIFO. One synchronous row RAM is enough:
-    // Zoom reads a full row; thumbnails fetch only every fourth source word
+    // Zoom reads a full row; thumbnails fetch only the displayed source words
     // into consecutive RAM entries before emitting a half output row.
     reg [23:0] zoom_line [(1<<LINE_AW)-1:0]; /* fehdl force_ram=1, ram_style="bram" */
     reg [23:0] zoom_line_q;
@@ -100,16 +105,16 @@ module media_frame_reader #(
     reg [15:0] zoom_row_issued, zoom_row_returned, zoom_x, zoom_y, zoom_source_x;
     reg [ADDR_WIDTH-1:0] zoom_row_base;
     wire zoom_active = (ZOOM_ENABLE && frame_zoom_mem!=1) || thumbnail_active;
-    // Four 1/4-size previews centered as a 2x2 block. Reuse ONE row RAM:
+    // Four sampled previews centered as a 2x2 block. Reuse ONE row RAM:
     // fetch left source row -> emit left half, fetch right -> emit right half.
     wire [1:0] thumbnail_slot={zoom_y>=FRAME_HEIGHT/2,zoom_x>=FRAME_WIDTH/2};
     wire [1:0] thumbnail_bank=thumbnail_mem[5+thumbnail_slot*2 +:2];
     wire thumbnail_row_valid=thumbnail_mem[thumbnail_slot] &&
-        zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4;
+        zoom_y>=THUMBNAIL_TOP && zoom_y<THUMBNAIL_BOTTOM;
     wire thumbnail_inside=thumbnail_row_valid &&
-        zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4;
-    wire thumbnail_window=zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4 &&
-        zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4;
+        zoom_x>=THUMBNAIL_LEFT && zoom_x<THUMBNAIL_RIGHT;
+    wire thumbnail_window=zoom_y>=THUMBNAIL_TOP && zoom_y<THUMBNAIL_BOTTOM &&
+        zoom_x>=THUMBNAIL_LEFT && zoom_x<THUMBNAIL_RIGHT;
     wire [23:0] thumbnail_rgb=thumbnail_inside ? zoom_line_q :
         thumbnail_window ? 24'h202830 : 24'h080c10;
     wire zoom_border = frame_zoom_mem==0 &&
@@ -120,7 +125,7 @@ module media_frame_reader #(
     // 同时保持地址、行 RAM 输出和坐标，恢复后不会重复或跳过像素。
     wire [15:0] zoom_next_source_x = thumbnail_active ?
         (zoom_x==FRAME_WIDTH/2-1 ? 16'd0 :
-         (zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
+         (zoom_x>=THUMBNAIL_LEFT && zoom_x<THUMBNAIL_RIGHT-1) ?
              zoom_source_x+16'd1 : zoom_source_x) : frame_zoom_mem==0 ?
         ((zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
             zoom_source_x+16'd2 : zoom_source_x) :
@@ -457,7 +462,7 @@ module media_frame_reader #(
             if (issue_allowed) begin
                 app_rd_en <= 1'b1;
                 app_rd_addr <= burst_base_mem + (zoom_active ?
-                    zoom_row_base + (thumbnail_active ? (zoom_row_issued << 2) : zoom_row_issued) :
+                    zoom_row_base + (thumbnail_active ? (zoom_row_issued * THUMBNAIL_DIV) : zoom_row_issued) :
                     issued_count_mem[ADDR_WIDTH-1:0]);
                 if(zoom_active) zoom_row_issued<=zoom_row_issued+1'b1;
                 issued_count_mem <= issued_count_mem + 1'b1;
@@ -465,7 +470,7 @@ module media_frame_reader #(
                 if (burst_issued_mem + 1'b1 == burst_target_mem) begin
                     burst_active_mem <= 1'b0;
                     // Keep thumbnail half-row refill latency short. Each
-                    // request fetches one sampled word at source stride four.
+                    // request fetches one displayed sample (constant stride).
                     // Full-frame reads retain their normal inter-burst gap.
                     burst_gap_count_mem <= thumbnail_active ? 0 : BURST_GAP_CYCLES;
                 end
@@ -510,8 +515,8 @@ module media_frame_reader #(
                             zoom_row_issued<=0; zoom_row_returned<=0;
                             if(thumbnail_active) begin
                                 if(zoom_y==FRAME_HEIGHT/2-1) zoom_row_base<=0;
-                                else if(zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4-1)
-                                    zoom_row_base<=zoom_row_base+4*FRAME_WIDTH;
+                                else if(zoom_y>=THUMBNAIL_TOP && zoom_y<THUMBNAIL_BOTTOM-1)
+                                    zoom_row_base<=zoom_row_base+THUMBNAIL_DIV*FRAME_WIDTH;
                             end else case(frame_zoom_mem)
                                 0: if(zoom_y>=FRAME_HEIGHT/4 && zoom_y<FRAME_HEIGHT*3/4-1)
                                     zoom_row_base<=zoom_row_base+2*FRAME_WIDTH;
@@ -528,7 +533,7 @@ module media_frame_reader #(
                             if(zoom_x==FRAME_WIDTH/2-1) begin
                                 zoom_state<=Z_READ; zoom_row_issued<=0; zoom_row_returned<=0;
                                 zoom_source_x<=0;
-                            end else if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
+                            end else if(zoom_x>=THUMBNAIL_LEFT && zoom_x<THUMBNAIL_RIGHT-1)
                                 zoom_source_x<=zoom_source_x+1'b1;
                         end else case(frame_zoom_mem)
                             0: if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)

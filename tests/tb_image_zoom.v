@@ -2,9 +2,11 @@
 // Real reader, row RAM, async FIFO and prefetch; memory returns ordered data.
 module tb_image_zoom #(
     parameter integer WIDTH=24, HEIGHT=12, BURST=4, FIFO_DEPTH=64, STALLS=0,
-    parameter integer MEM_HALF_NS=4
+    parameter integer MEM_HALF_NS=4, THUMBNAIL_DIV=2
 );
     localparam integer WORDS=WIDTH*HEIGHT, AW=$clog2(WORDS*4);
+    localparam integer TW=WIDTH/THUMBNAIL_DIV, TH=HEIGHT/THUMBNAIL_DIV;
+    localparam integer TL=WIDTH/2-TW, TT=HEIGHT/2-TH;
     reg mem_clk=0, pix_clk=0, rst=1;
     always #(MEM_HALF_NS) mem_clk=~mem_clk;
     always #20 pix_clk=~pix_clk;
@@ -24,6 +26,7 @@ module tb_image_zoom #(
     reg [31:0] data_pipe[0:7];
     media_frame_reader #(.ADDR_WIDTH(AW), .IMAGE_WORDS(WORDS),
         .FRAME_WIDTH(WIDTH), .FRAME_HEIGHT(HEIGHT), .ZOOM_ENABLE(1), .THUMBNAIL_ENABLE(1),
+        .THUMBNAIL_DIV(THUMBNAIL_DIV),
         .REGION_READ_ENABLE(1), .FIFO_DEPTH(FIFO_DEPTH), .FIFO_MARGIN(4),
         .BURST_SIZE(BURST), .BURST_GAP_CYCLES(WIDTH<640 ? 1 : 12)) dut (
         .mem_clk(mem_clk), .mem_rst_n(~rst), .controller_init_done(1'b1),
@@ -133,12 +136,12 @@ module tb_image_zoom #(
         begin
             @(negedge pix_clk);
             check_thumbnail=1; thumbnail_reads=0; issued=0; emitted=0;
-            for(r=HEIGHT/4;r<HEIGHT*3/4;r=r+1)
+            for(r=TT;r<HEIGHT/2+TH;r=r+1)
                 for(half=0;half<2;half=half+1) begin
                     bank_id=(r>=HEIGHT/2 ? 2 : 0)+half;
-                    local_y=(r>=HEIGHT/2 ? r-HEIGHT/2 : r-HEIGHT/4)*4;
-                    if(mask[bank_id]) for(col=0;col<WIDTH/4;col=col+1) begin
-                        thumbnail_addresses[thumbnail_reads]=bank_map[bank_id*2 +:2]*WORDS+local_y*WIDTH+col*4;
+                    local_y=(r>=HEIGHT/2 ? r-HEIGHT/2 : r-TT)*THUMBNAIL_DIV;
+                    if(mask[bank_id]) for(col=0;col<TW;col=col+1) begin
+                        thumbnail_addresses[thumbnail_reads]=bank_map[bank_id*2 +:2]*WORDS+local_y*WIDTH+col*THUMBNAIL_DIV;
                         thumbnail_reads=thumbnail_reads+1;
                     end
                 end
@@ -151,10 +154,10 @@ module tb_image_zoom #(
             for(y=0;y<HEIGHT;y=y+1) begin
                 for(x=0;x<WIDTH;x=x+1) begin
                     expected=24'h080c10;
-                    if(x>=WIDTH/4 && x<WIDTH*3/4 && y>=HEIGHT/4 && y<HEIGHT*3/4) begin
+                    if(x>=TL && x<WIDTH/2+TW && y>=TT && y<HEIGHT/2+TH) begin
                         bank_id=(y>=HEIGHT/2 ? 2 : 0)+(x>=WIDTH/2 ? 1 : 0);
-                        sx=(x>=WIDTH/2 ? x-WIDTH/2 : x-WIDTH/4)*4;
-                        sy=(y>=HEIGHT/2 ? y-HEIGHT/2 : y-HEIGHT/4)*4;
+                        sx=(x>=WIDTH/2 ? x-WIDTH/2 : x-TL)*THUMBNAIL_DIV;
+                        sy=(y>=HEIGHT/2 ? y-HEIGHT/2 : y-TT)*THUMBNAIL_DIV;
                         expected=mask[bank_id] ? pattern(bank_map[bank_id*2 +:2],sy*WIDTH+sx) : 24'h202830;
                     end
                     if(!valid || rgb!==expected || displayed_thumbnail!==saved)
