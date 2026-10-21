@@ -208,7 +208,7 @@ module sd_fat32_image_source #(
     wire [7:0] sectors_per_cluster; // 每簇扇区数（2 的幂）
     wire [31:0] max_cluster;        // 卷上最大合法簇号（防坏链越界）
     wire [15:0] audio_resource_valid;
-    wire [511:0] audio_clusters, audio_sizes;
+    wire [31:0] audio_read_cluster, audio_read_size;
     reg [31:0] audio_cluster, audio_size;
     reg audio_selected;
     (* ASYNC_REG = "TRUE" *) reg [3:0] audio_image_meta, audio_image_sync;
@@ -489,7 +489,7 @@ module sd_fat32_image_source #(
     // 职责：读 LBA0/BPB → 沿根目录簇链找 PIC1~PIC16.BMP 和 AUDIO1~16.PCM →
     // 输出资源表（首簇+大小）和文件系统几何参数。
     // 注意 rst_n 接 ~rst：scanner 内部是低有效复位，本模块是高有效。
-    fat32_volume_scanner u_volume_scanner (
+    fat32_volume_scanner #(.COMPACT_AUDIO_TABLE(1)) u_volume_scanner (
         .clk                  (clk),
         .rst_n                (~rst),
         // 扫描事务
@@ -516,8 +516,11 @@ module sd_fat32_image_source #(
         .resource2_size       (resource2_size),
         .resource3_size       (resource3_size),
         .audio_resource_valid (audio_resource_valid),
-        .audio_cluster        (audio_clusters),
-        .audio_size           (audio_sizes),
+        .audio_cluster        (),
+        .audio_size           (),
+        .audio_read_slot      (audio_lookup_slot),
+        .audio_read_cluster   (audio_read_cluster),
+        .audio_read_size      (audio_read_size),
         .debug_state          (scanner_debug_state),
         .debug_sector_done_count(scanner_debug_sector_done_count),
         .debug_resource_valid (scanner_debug_resource_valid),
@@ -818,15 +821,19 @@ module sd_fat32_image_source #(
                 // 逐拍把播放序号映射回PIC文件名槽，因此PIC1/PIC5/PIC16缺号也匹配正确。
                 4: if(scan_usable) begin
                     if(resource_valid[audio_lookup_slot] && audio_lookup_index==audio_image_q) begin
-                        audio_cluster<=audio_clusters[audio_lookup_slot*32 +:32];
-                        audio_size<=audio_sizes[audio_lookup_slot*32 +:32];
                         audio_selected<=audio_resource_valid[audio_lookup_slot];
-                        audio_switch_state<=5;
+                        audio_switch_state<=6;
                     end else if(audio_lookup_slot==15) audio_switch_state<=5;
                     else begin
                         audio_lookup_slot<=audio_lookup_slot+1'b1;
                         if(resource_valid[audio_lookup_slot]) audio_lookup_index<=audio_lookup_index+1'b1;
                     end
+                end
+                // One extra cycle consumes the synchronous BRAM result.
+                6: begin
+                    audio_cluster<=audio_read_cluster;
+                    audio_size<=audio_read_size;
+                    audio_switch_state<=5;
                 end
                 5: begin
                     if(audio_selected && (audio_size==0 || audio_size[0])) begin

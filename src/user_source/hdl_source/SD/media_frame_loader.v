@@ -58,7 +58,8 @@ module media_frame_loader #(
     reg [ADDR_WIDTH-1:0] write_offset;
     reg [31:0] write_x;
     reg [31:0] stall_count;
-    reg [31:0] fifo_mem [0:FIFO_DEPTH-1];
+    reg [23:0] fifo_mem [0:FIFO_DEPTH-1]; /* fehdl force_ram=1, ram_style="bram" */
+    reg [23:0] fifo_read_q;
     reg [PTR_WIDTH-1:0] wr_ptr;
     reg [PTR_WIDTH-1:0] rd_ptr;
     reg [PTR_WIDTH:0] fifo_count;
@@ -73,6 +74,17 @@ module media_frame_loader #(
                        ((fifo_count >= EFFECTIVE_BURST) || commit_seen);
     wire [PTR_WIDTH:0] next_burst_words =
         (fifo_count >= EFFECTIVE_BURST) ? EFFECTIVE_BURST : fifo_count;
+
+    // Keep the synchronous RAM ports outside reset/control logic. Data is
+    // qualified by app_wr_en; stale data while idle/reset is never consumed.
+    wire fifo_transaction = rst_n && loader_active && decode_error==0 &&
+        !(pixel_valid && pixels_received>=IMAGE_WORDS) &&
+        !(pixel_valid && !push_allowed);
+    always @(posedge clk) begin
+        if(fifo_transaction && push_allowed) fifo_mem[wr_ptr]<=pixel_rgb;
+        if(fifo_transaction && pop_allowed) fifo_read_q<=fifo_mem[rd_ptr];
+    end
+    always @* app_wr_data={fifo_read_q,8'd0};
 
     function [ADDR_WIDTH-1:0] bank_base;
         input [1:0] index;
@@ -109,7 +121,6 @@ module media_frame_loader #(
             app_wr_en <= 1'b0;
             app_wr_addr <= 0;
             app_wr_mask <= 4'b0000;
-            app_wr_data <= 0;
         end else begin
             load_done <= 1'b0;
             app_wr_en <= 1'b0;
@@ -163,7 +174,6 @@ module media_frame_loader #(
 
                     if (push_allowed) begin
                         // 与原写侧一致：SDRAM 一个字为 {R,G,B,8'h00}。
-                        fifo_mem[wr_ptr] <= {pixel_rgb, 8'h00};
                         wr_ptr <= wr_ptr + 1'b1;
                         pixels_received <= pixels_received + 1'b1;
                     end
@@ -178,7 +188,6 @@ module media_frame_loader #(
                             write_x <= write_x + 1'b1;
                             write_offset <= write_offset + 1'b1;
                         end
-                        app_wr_data <= fifo_mem[rd_ptr];
                         app_wr_mask <= 4'b0000;
                         rd_ptr <= rd_ptr + 1'b1;
                         pixels_written <= pixels_written + 1'b1;

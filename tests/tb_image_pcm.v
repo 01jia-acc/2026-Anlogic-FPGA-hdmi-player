@@ -142,7 +142,7 @@ module tb_image_pcm;
         if(dut.resource_valid!==16'h8b11 || dut.audio_resource_valid!==16'hffef)
             $fatal(1,"Numbered/sparse metadata mask mismatch pic=%h audio=%h",dut.resource_valid,dut.audio_resource_valid);
         for(i=0;i<16;i=i+1) if(i!=4) begin
-            if(dut.audio_clusters[i*32 +:32]!==32+i*8)
+            if(dut.u_volume_scanner.g_audio_ram.metadata[i][63:32]!==32+i*8)
                 $fatal(1,"Wrong numbered metadata slot %0d",i);
         end
         repeat(3000) @(negedge clk);
