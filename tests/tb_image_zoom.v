@@ -137,8 +137,8 @@ module tb_image_zoom #(
                 for(half=0;half<2;half=half+1) begin
                     bank_id=(r>=HEIGHT/2 ? 2 : 0)+half;
                     local_y=(r>=HEIGHT/2 ? r-HEIGHT/2 : r-HEIGHT/4)*4;
-                    if(mask[bank_id]) for(col=0;col<WIDTH;col=col+1) begin
-                        thumbnail_addresses[thumbnail_reads]=bank_map[bank_id*2 +:2]*WORDS+local_y*WIDTH+col;
+                    if(mask[bank_id]) for(col=0;col<WIDTH/4;col=col+1) begin
+                        thumbnail_addresses[thumbnail_reads]=bank_map[bank_id*2 +:2]*WORDS+local_y*WIDTH+col*4;
                         thumbnail_reads=thumbnail_reads+1;
                     end
                 end

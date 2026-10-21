@@ -89,8 +89,10 @@ module media_frame_reader #(
     assign display_thumbnail=thumbnail_pix;
     wire thumbnail_active=THUMBNAIL_ENABLE && thumbnail_mem[4];
     localparam integer LINE_AW = FRAME_WIDTH<=2 ? 1 : $clog2(FRAME_WIDTH);
+    localparam integer THUMBNAIL_ROW_WORDS = FRAME_WIDTH/4;
     // Reuse the existing output FIFO. One synchronous row RAM is enough:
-    // read a contiguous source row, then sample it into one output row.
+    // Zoom reads a full row; thumbnails fetch only every fourth source word
+    // into consecutive RAM entries before emitting a half output row.
     reg [23:0] zoom_line [(1<<LINE_AW)-1:0]; /* fehdl force_ram=1, ram_style="bram" */
     reg [23:0] zoom_line_q;
     localparam Z_READ=0, Z_ADDRESS=1, Z_PUSH=2;
@@ -119,7 +121,7 @@ module media_frame_reader #(
     wire [15:0] zoom_next_source_x = thumbnail_active ?
         (zoom_x==FRAME_WIDTH/2-1 ? 16'd0 :
          (zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
-             zoom_source_x+16'd4 : zoom_source_x) : frame_zoom_mem==0 ?
+             zoom_source_x+16'd1 : zoom_source_x) : frame_zoom_mem==0 ?
         ((zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
             zoom_source_x+16'd2 : zoom_source_x) :
         frame_zoom_mem==2 ? (zoom_x_phase>=1 ? zoom_source_x+16'd1 : zoom_source_x) :
@@ -176,14 +178,10 @@ module media_frame_reader #(
     wire fifo_almost_full;
     wire [FIFO_COUNT_W-1:0] fifo_wrusedw;
     assign zoom_room = !fifo_full && fifo_wrusedw<FIFO_DEPTH-FIFO_MARGIN;
-    // Stream thumbnail samples while the rest of the source row is arriving.
-    // Waiting for both complete rows before emitting costs > one VGA line at
-    // 50 MHz. Keep contiguous SDRAM bursts and reuse the same single row RAM.
+    // A thumbnail half-row starts only after all sampled words have returned.
+    // Never reuse the single row RAM while old-bank returns are still pending.
     wire thumbnail_sample_ready = !thumbnail_active || !thumbnail_row_valid ||
-        ((zoom_row_returned > zoom_source_x) &&
-         (zoom_x==FRAME_WIDTH/2-1 || zoom_x==FRAME_WIDTH-1 ?
-             zoom_row_returned==FRAME_WIDTH :
-             zoom_row_returned > zoom_next_source_x));
+        (zoom_row_returned > zoom_source_x);
     assign zoom_write = zoom_active && reader_busy && zoom_state==Z_PUSH && zoom_room &&
                         !fifo_reset && thumbnail_sample_ready;
     wire [31:0] fifo_raw_data;
@@ -201,7 +199,8 @@ module media_frame_reader #(
     localparam integer FULL_BURSTS_ONLY = (IMAGE_WORDS % BURST_SIZE) == 0;
     wire [ADDR_WIDTH:0] remaining_words = IMAGE_WORDS - issued_count_mem;
     wire [ADDR_WIDTH:0] next_burst_words = zoom_active ?
-        ((FRAME_WIDTH-zoom_row_issued>BURST_SIZE) ? BURST_SIZE : FRAME_WIDTH-zoom_row_issued) :
+        (((thumbnail_active ? THUMBNAIL_ROW_WORDS : FRAME_WIDTH)-zoom_row_issued>BURST_SIZE) ?
+            BURST_SIZE : (thumbnail_active ? THUMBNAIL_ROW_WORDS : FRAME_WIDTH)-zoom_row_issued) :
         FULL_BURSTS_ONLY ? BURST_SIZE :
         ((remaining_words > BURST_SIZE) ? BURST_SIZE : remaining_words);
     wire [ADDR_WIDTH+2:0] reserved_after_burst =
@@ -221,7 +220,8 @@ module media_frame_reader #(
                        burst_gap_count_mem == 0 &&
                        (thumbnail_active || issued_count_mem != IMAGE_WORDS) &&
                        inflight_window_ok_q && (zoom_active ?
-                           ((zoom_state==Z_READ || thumbnail_active) && zoom_row_issued<FRAME_WIDTH &&
+                           ((zoom_state==Z_READ || thumbnail_active) &&
+                            zoom_row_issued<(thumbnail_active ? THUMBNAIL_ROW_WORDS : FRAME_WIDTH) &&
                             (!thumbnail_active || thumbnail_row_valid)) : fifo_reservation_ok_q);
     wire issue_allowed = !DIAG_SYNTH_STREAM && reader_busy && burst_active_mem;
     // reader_busy 表示“整帧读取事务仍未完成”，不能直接拿来做 SDRAM
@@ -457,17 +457,16 @@ module media_frame_reader #(
             if (issue_allowed) begin
                 app_rd_en <= 1'b1;
                 app_rd_addr <= burst_base_mem + (zoom_active ?
-                    zoom_row_base+zoom_row_issued : issued_count_mem[ADDR_WIDTH-1:0]);
+                    zoom_row_base + (thumbnail_active ? (zoom_row_issued << 2) : zoom_row_issued) :
+                    issued_count_mem[ADDR_WIDTH-1:0]);
                 if(zoom_active) zoom_row_issued<=zoom_row_issued+1'b1;
                 issued_count_mem <= issued_count_mem + 1'b1;
                 burst_issued_mem <= burst_issued_mem + 1'b1;
                 if (burst_issued_mem + 1'b1 == burst_target_mem) begin
                     burst_active_mem <= 1'b0;
-                    // At 50 MHz a thumbnail consumes two source words per
-                    // 25 MHz output pixel. The thumbnail path therefore has
-                    // no throughput margin for the normal inter-burst gap.
-                    // Keep the gap for full-frame reads, but run adjacent
-                    // bursts for the thumbnail stream.
+                    // Keep thumbnail half-row refill latency short. Each
+                    // request fetches one sampled word at source stride four.
+                    // Full-frame reads retain their normal inter-burst gap.
                     burst_gap_count_mem <= thumbnail_active ? 0 : BURST_GAP_CYCLES;
                 end
             end
@@ -477,7 +476,7 @@ module media_frame_reader #(
                 if(zoom_active) begin
                     zoom_row_returned<=zoom_row_returned+1'b1;
                     if(thumbnail_active) begin
-                        if(zoom_state==Z_READ && zoom_row_returned==1)
+                        if(zoom_state==Z_READ && zoom_row_returned==THUMBNAIL_ROW_WORDS-1)
                             zoom_state<=Z_ADDRESS;
                     end else if(zoom_row_returned==FRAME_WIDTH-1) zoom_state<=Z_ADDRESS;
                 end else if (fifo_full) begin
@@ -530,7 +529,7 @@ module media_frame_reader #(
                                 zoom_state<=Z_READ; zoom_row_issued<=0; zoom_row_returned<=0;
                                 zoom_source_x<=0;
                             end else if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
-                                zoom_source_x<=zoom_source_x+3'd4;
+                                zoom_source_x<=zoom_source_x+1'b1;
                         end else case(frame_zoom_mem)
                             0: if(zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1)
                                 zoom_source_x<=zoom_source_x+2'd2;
