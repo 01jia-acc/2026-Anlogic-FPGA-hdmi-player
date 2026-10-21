@@ -50,14 +50,14 @@ module tb_image_pcm;
         input integer logical_id;
         begin
             case(logical_id)
-                0:file_number=1; 1:file_number=5; 2:file_number=9;
-                3:file_number=10; 4:file_number=8; default:file_number=7;
+                0:file_number=1; 1:file_number=5; 2:file_number=7;
+                3:file_number=8; 4:file_number=9; default:file_number=10;
             endcase
         end
     endfunction
     function integer samples;
         input integer number;
-        begin samples=number==1 ? 1300 : number==16 ? 257 : number==9 ? 7 : number+2; end
+        begin samples=number==1 ? 1300 : number==10 ? 257 : number==7 ? 7 : number+2; end
     endfunction
     function [15:0] pattern;
         input integer number,index;
@@ -117,8 +117,8 @@ module tb_image_pcm;
             c=32+(i-1)*8; sz=samples(i);
             entry(10*512+(i-1)*32,audio_name(i),c,sz*2);
             if(i==5) disk[10*512+(i-1)*32]=8'he5; // Missing match.
-            if(i==10) put32(10*512+(i-1)*32+28,0); // Empty file.
-            if(i==8) put32(10*512+(i-1)*32+28,3); // Odd length.
+            if(i==8) put32(10*512+(i-1)*32+28,0); // Empty file.
+            if(i==9) put32(10*512+(i-1)*32+28,3); // Odd length.
             for(n=0;n<(sz+255)/256;n=n+1) begin
                 // Non-contiguous data clusters, including a FAT-sector boundary.
                 offset=c+(n==0 ? 0 : n+1);
@@ -139,7 +139,7 @@ module tb_image_pcm;
         force dut.sd_sec_read_end=card_end;
         repeat(8) @(negedge clk); rst=0; scan=1;
         @(negedge clk); scan=0; wait(scan_done);
-        if(dut.resource_valid!==16'h0391 || dut.audio_resource_valid!==16'h03ef)
+        if(dut.resource_valid!==16'h03d1 || dut.audio_resource_valid!==16'h03ef)
             $fatal(1,"Numbered/sparse metadata mask mismatch pic=%h audio=%h",dut.resource_valid,dut.audio_resource_valid);
         for(i=0;i<10;i=i+1) if(i!=4) begin
             if(dut.u_volume_scanner.g_audio_ram.metadata[i][63:32]!==32+i*8)
@@ -158,7 +158,7 @@ module tb_image_pcm;
         request_image=5; repeat(3000) @(negedge pixel_clk);
         if(video_image!=0 || dut.audio_size!=2600) $fatal(1,"Requested-only image changed audio");
         request_image=0;
-        // Background load of PIC16: no audio restart or sample contamination.
+        // Background load of PIC10: no audio restart or sample contamination.
         @(negedge clk); allow_play=0; wait(dut.source_ready);
         @(negedge clk); load=1;
         @(negedge clk); load=0; wait(image_done);
@@ -172,7 +172,7 @@ module tb_image_pcm;
         repeat(3000) @(negedge pixel_clk);
         if(active || error!=0 || received!=0) $fatal(1,"Missing file is not silent");
         end_wipe;
-        present(2); wait(received>=30); end_wipe; // PIC9 -> AUDIO9, not AUDIO3.
+        present(2); wait(received>=30); end_wipe; // PIC7 -> AUDIO7, not AUDIO3.
         present(3); wait(dut.audio_switch_state==0 && error==8'h71);
         repeat(3000) @(negedge pixel_clk);
         if(active || received!=0) $fatal(1,"Empty file not silent");
