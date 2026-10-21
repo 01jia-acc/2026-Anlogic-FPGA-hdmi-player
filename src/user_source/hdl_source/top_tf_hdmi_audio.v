@@ -621,7 +621,7 @@ media_frame_reader #(
     .BURST_GAP_CYCLES    (12),
     .MAX_INFLIGHT_BURSTS (2),
     .REGION_READ_ENABLE (TRANSITION_MODE == 2),
-    .ZOOM_ENABLE(1), .THUMBNAIL_ENABLE(1), .FRAME_WIDTH(640), .FRAME_HEIGHT(480)
+    .ZOOM_ENABLE(1), .THUMBNAIL_ENABLE(1), .THUMBNAIL_DIV(4), .FRAME_WIDTH(640), .FRAME_HEIGHT(480)
 ) u_media_frame_reader (
     .mem_clk             (ext_mem_clk),
     .mem_rst_n           (~rst_all),
@@ -761,7 +761,7 @@ zoom_status_osd u_zoom_status (
     .zoom_level(display_thumbnail[23] ? 2'd1 : display_zoom_level),
     .rgb_in(timestamp_rgb), .rgb_out(zoom_rgb)
 );
-thumbnail_status_osd u_thumbnail_status (
+thumbnail_status_osd #(.THUMBNAIL_DIV(4)) u_thumbnail_status (
     .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
     .descriptor(display_thumbnail), .rgb_in(zoom_rgb), .rgb_out(thumbnail_rgb)
 );

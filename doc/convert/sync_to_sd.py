@@ -1,4 +1,4 @@
-"""将合规 BMP 同步为 FAT32 根目录的 PIC1.BMP～PIC16.BMP。"""
+"""将合规 BMP 同步为 FAT32 根目录的 PIC1.BMP～PIC10.BMP。"""
 import argparse
 from pathlib import Path
 import re
@@ -6,8 +6,8 @@ import shutil
 import struct
 import tempfile
 
-MAX_IMAGES = 16
-MANAGED_NAME = re.compile(r"PIC(?:[1-9]|1[0-6])\.BMP", re.IGNORECASE)
+MAX_IMAGES = 10
+MANAGED_NAME = re.compile(r"PIC(?:[1-9]|10)\.BMP", re.IGNORECASE)
 
 
 def validate_bmp(path):
@@ -33,7 +33,7 @@ def validate_bmp(path):
 def sync_new_images(source_dir, target_drive, max_count=MAX_IMAGES):
     """只替换播放器的 PIC 文件；保留所有 PCM 和其他文件/目录。"""
     if not 1 <= max_count <= MAX_IMAGES:
-        raise ValueError("图片数量必须在 1～16 之间")
+        raise ValueError("图片数量必须在 1～10 之间")
     source = Path(source_dir).resolve()
     target = Path(target_drive).resolve()
     if not source.is_dir():
@@ -74,12 +74,12 @@ def sync_new_images(source_dir, target_drive, max_count=MAX_IMAGES):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FAT32 多图片同步工具（最多16张，保留音频）")
+    parser = argparse.ArgumentParser(description="FAT32 多图片同步工具（最多10张，保留音频）")
     parser.add_argument("drive", help="SD 卡盘符，例如 E:；也可指定已有目标目录")
     parser.add_argument("-s", "--source", default=str(Path(__file__).resolve().parent / "output_bmp"),
                         help="BMP 源目录，默认脚本旁的 output_bmp")
     parser.add_argument("-n", "--num", type=int, default=MAX_IMAGES,
-                        help="最多同步的图片数，1～16，默认16")
+                        help="最多同步的图片数，1～10，默认10")
     args = parser.parse_args()
     destination = args.drive + "\\" if re.fullmatch(r"[A-Za-z]:", args.drive) else args.drive
     try:

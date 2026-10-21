@@ -46,16 +46,16 @@ class BmpToolsTests(unittest.TestCase):
 
     def test_sixteen_then_reduce_and_preserve_audio_other_files(self):
         self.make_images(18)
-        for name in ("AUDIO.PCM", "OTHER.BMP", "PIC17.BMP", "notes.txt"):
+        for name in ("AUDIO.PCM", "OTHER.BMP", "PIC16.BMP", "notes.txt"):
             (self.target / name).write_bytes(b"keep")
         (self.target / "folder").mkdir()
-        self.assertEqual(sync.sync_new_images(self.source, self.target), 16)
-        for i in range(1, 17):
+        self.assertEqual(sync.sync_new_images(self.source, self.target), 10)
+        for i in range(1, 11):
             self.assertEqual((self.target / f"PIC{i}.BMP").read_bytes(), self.bmp_bytes)
         self.assertEqual(sync.sync_new_images(self.source, self.target, 2), 2)
         self.assertFalse((self.target / "PIC3.BMP").exists())
-        self.assertFalse((self.target / "PIC16.BMP").exists())
-        for name in ("AUDIO.PCM", "OTHER.BMP", "PIC17.BMP", "notes.txt"):
+        self.assertFalse((self.target / "PIC10.BMP").exists())
+        for name in ("AUDIO.PCM", "OTHER.BMP", "PIC16.BMP", "notes.txt"):
             self.assertEqual((self.target / name).read_bytes(), b"keep")
         self.assertTrue((self.target / "folder").is_dir())
 

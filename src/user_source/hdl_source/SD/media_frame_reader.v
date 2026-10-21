@@ -13,7 +13,7 @@ module media_frame_reader #(
     parameter integer REGION_READ_ENABLE = 0,
     parameter integer ZOOM_ENABLE = 0,
     parameter integer THUMBNAIL_ENABLE = 0,
-    parameter integer THUMBNAIL_DIV = 2,
+    parameter integer THUMBNAIL_DIV = 4,
     parameter integer FRAME_WIDTH = 640,
     parameter integer FRAME_HEIGHT = 480
 ) (

@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// FAT32 根目录扫描器：支持 PIC1~PIC16.BMP 和 AUDIO1~AUDIO16.PCM。
+// FAT32 根目录扫描器：支持 PIC1~PIC10.BMP 和 AUDIO1~AUDIO10.PCM。
 // 支持 MBR/无分区卷，沿根目录 FAT 簇链查找，忽略删除项、目录、卷标和长名项。
 // 资源表按文件编号排列，位 0 对应 PIC1；旧四槽输出保留用于诊断/兼容。
 module fat32_volume_scanner #(
@@ -142,15 +142,16 @@ module fat32_volume_scanner #(
     // No reset on RAM data: valid bits invalidate the table on reset/rescan.
     // Production only needs one synchronous lookup port, never 1024 parallel bits.
     generate if(COMPACT_AUDIO_TABLE) begin : g_audio_ram
-        reg [63:0] metadata [0:15]; /* fehdl force_ram=1, ram_style="bram" */
+        reg [63:0] metadata [0:9]; /* fehdl force_ram=1, ram_style="bram" */
         reg [63:0] read_q;
         always @(posedge clk) begin
-            if(rst_n && |entry_audio_write)
+            if(rst_n && |entry_audio_write && entry_audio_slot < 10)
                 metadata[entry_audio_slot]<={entry_cluster,entry_size};
-            read_q<=metadata[audio_read_slot];
+            if(audio_read_slot < 10) read_q<=metadata[audio_read_slot];
+            else read_q<=64'd0;
         end
-        assign audio_read_cluster=audio_resource_valid[audio_read_slot] ? read_q[63:32] : 32'd0;
-        assign audio_read_size=audio_resource_valid[audio_read_slot] ? read_q[31:0] : 32'd0;
+        assign audio_read_cluster=(audio_read_slot < 10 && audio_resource_valid[audio_read_slot]) ? read_q[63:32] : 32'd0;
+        assign audio_read_size=(audio_read_slot < 10 && audio_resource_valid[audio_read_slot]) ? read_q[31:0] : 32'd0;
     end else begin : g_audio_parallel
         assign audio_read_cluster=audio_cluster[audio_read_slot*32 +:32];
         assign audio_read_size=audio_size[audio_read_slot*32 +:32];
@@ -300,7 +301,7 @@ module fat32_volume_scanner #(
             sector_req <= 1'b0;
             entry_pic_write <= 0;
             entry_audio_write <= 0;
-            for (name_slot=0; name_slot<16; name_slot=name_slot+1) begin
+            for (name_slot=0; name_slot<10; name_slot=name_slot+1) begin
                 if(entry_pic_write[name_slot]) begin
                     resource_clusters[name_slot*32 +:32] <= entry_cluster;
                     resource_sizes[name_slot*32 +:32] <= entry_size;
@@ -563,7 +564,7 @@ module fat32_volume_scanner #(
                                     dir_first_byte != 8'he5 &&
                                     (dir_attr & 8'h0f) != 8'h0f &&
                                     (dir_attr & 8'h18) == 8'h00) begin
-                                    for (name_slot=0; name_slot<16; name_slot=name_slot+1) begin
+                                    for (name_slot=0; name_slot<10; name_slot=name_slot+1) begin
                                         if (dir_audio_match && dir_audio_slot == name_slot && !audio_resource_valid[name_slot]) begin
                                             entry_audio_write[name_slot] <= 1'b1;
                                         end

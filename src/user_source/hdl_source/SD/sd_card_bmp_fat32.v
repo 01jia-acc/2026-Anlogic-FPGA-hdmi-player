@@ -299,10 +299,10 @@ module sd_card_bmp_fat32 #(
         integer i;
         begin
             resource_count=0;
-            for(i=0;i<16;i=i+1) resource_count=resource_count+mask[i];
+            for(i=0;i<10;i=i+1) resource_count=resource_count+mask[i];
         end
     endfunction
-    // 每拍查看一个目录槽，避免16槽计数/选择串成单周期长路径。
+    // 每拍查看一个目录槽，播放列表最多十项。
     // 查到后将参数保持在寄存器中，下一阶段才发 load_start。
     assign debug_load_image_number = {1'b0,load_idx} + 5'd1;
     assign debug_load_cluster = load_cluster_lut;
@@ -310,7 +310,7 @@ module sd_card_bmp_fat32 #(
     // Raw scanner mask / saved scheduler mask / count / displayed playlist
     // number / last selected physical PIC number / loader and cache flags.
     // Transfer this whole word through a mailbox before UART sampling.
-    assign debug_playlist = {resource_valid, image_resource_valid,
+    assign debug_playlist = {resource_valid, (image_resource_valid & 16'h03ff),
         3'd0, img_found_count,
         (display_valid ? {4'd0,img_idx}+8'd1 : 8'd0),
         saved_pic10_size_bit5, resource_sizes[293], debug_pic10_size_bit5, load_file_number,

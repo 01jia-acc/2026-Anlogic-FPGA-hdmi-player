@@ -51,7 +51,7 @@ module tb_image_pcm;
         begin
             case(logical_id)
                 0:file_number=1; 1:file_number=5; 2:file_number=9;
-                3:file_number=10; 4:file_number=12; default:file_number=16;
+                3:file_number=10; 4:file_number=8; default:file_number=7;
             endcase
         end
     endfunction
@@ -118,7 +118,7 @@ module tb_image_pcm;
             entry(10*512+(i-1)*32,audio_name(i),c,sz*2);
             if(i==5) disk[10*512+(i-1)*32]=8'he5; // Missing match.
             if(i==10) put32(10*512+(i-1)*32+28,0); // Empty file.
-            if(i==12) put32(10*512+(i-1)*32+28,3); // Odd length.
+            if(i==8) put32(10*512+(i-1)*32+28,3); // Odd length.
             for(n=0;n<(sz+255)/256;n=n+1) begin
                 // Non-contiguous data clusters, including a FAT-sector boundary.
                 offset=c+(n==0 ? 0 : n+1);
@@ -139,9 +139,9 @@ module tb_image_pcm;
         force dut.sd_sec_read_end=card_end;
         repeat(8) @(negedge clk); rst=0; scan=1;
         @(negedge clk); scan=0; wait(scan_done);
-        if(dut.resource_valid!==16'h8b11 || dut.audio_resource_valid!==16'hffef)
+        if(dut.resource_valid!==16'h0391 || dut.audio_resource_valid!==16'h03ef)
             $fatal(1,"Numbered/sparse metadata mask mismatch pic=%h audio=%h",dut.resource_valid,dut.audio_resource_valid);
-        for(i=0;i<16;i=i+1) if(i!=4) begin
+        for(i=0;i<10;i=i+1) if(i!=4) begin
             if(dut.u_volume_scanner.g_audio_ram.metadata[i][63:32]!==32+i*8)
                 $fatal(1,"Wrong numbered metadata slot %0d",i);
         end
@@ -150,7 +150,7 @@ module tb_image_pcm;
         request_valid=1; present(0);
         wait(received>=1300*2+100);
         @(negedge pixel_clk); // Observe after the accepted sample's NBA updates.
-        if(pcm_diagnostic[159:144]!==16'hffef ||
+        if(pcm_diagnostic[159:144]!==16'h03ef ||
            pcm_diagnostic[111:80]!==32'd32 || pcm_diagnostic[79:48]!==32'd2600 ||
            pcm_diagnostic[47:16]<2700 || pcm_diagnostic[15:0]!==sample)
             $fatal(1,"PCM diagnostic lost scanned mask, selected file or consumed samples: %h",pcm_diagnostic);
@@ -198,7 +198,7 @@ module tb_image_pcm;
             $fatal(1,"Rapid commits did not wait for the stalled old sector safely");
         @(negedge clk); card_hold=0;
         wait(received>=600);
-        $display("PASS: per-image PCM, all 16 numbered slots, sparse PIC mapping, no legacy fallback, actual frame/wipe commit, prefetch isolation, fragmented loops, atomic clear, missing/invalid silence, revisit from zero, mode pause, rapid commits, HDMI samples (%0d total)",total);
+        $display("PASS: per-image PCM, ten numbered slots, sparse PIC mapping, no legacy fallback, actual frame/wipe commit, prefetch isolation, fragmented loops, atomic clear, missing/invalid silence, revisit from zero, mode pause, rapid commits, HDMI samples (%0d total)",total);
         $finish;
     end
     task frame_pulse;

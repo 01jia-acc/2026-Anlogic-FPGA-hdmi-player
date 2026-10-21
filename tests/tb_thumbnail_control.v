@@ -156,48 +156,48 @@ module tb_thumbnail_control;
         press(3,65); if(!pcm_mode) $fatal(1,"Normal audio toggle");
         press(3,65); if(pcm_mode) $fatal(1,"Normal audio toggle back");
         // Sweep every page forward, including start/end clamping.
-        for(i=1;i<16;i=i+1) begin
+        for(i=1;i<10;i=i+1) begin
             press(2,65); frame; fill_window;
-            check_window(i<2 ? 0 : i>14 ? 12 : i-2,i);
+            check_window(i<2 ? 0 : i>8 ? 6 : i-2,i);
         end
         // Playback still wraps; the preview window itself never wraps.
         if(dut.image_read_needed) $fatal(1,"Settled last window unnecessarily blocks PCM");
         press(2,65); finish_load(0); frame; fill_window; check_window(0,0);
-        press(4,280); finish_load(15); frame; fill_window; check_window(12,15);
+        press(4,280); finish_load(9); frame; fill_window; check_window(6,9);
         // Backward navigation must refill the opposite side too.
-        for(i=14;i>=8;i=i-1) begin
+        for(i=8;i>=2;i=i-1) begin
             press(4,280); frame; fill_window;
-            check_window(i>14 ? 12 : i-2,i);
+            check_window(i>8 ? 6 : i-2,i);
         end
-        check_window(6,8); // user image9 -> 7,8,9,10
+        check_window(0,2); // user image3 -> 1,2,3,4
         press(3,280); press(2,65); press(3,65); frame;
         if(!descriptor[23] || descriptor[21:20]!=2 || zoom_level!=2) $fatal(1,"Current logical focus");
         saved_audio=audio_toggle;
         for(k=0;k<4;k=k+1) press(2,65);
         if(descriptor[21:20]!=2 || audio_toggle!=saved_audio) $fatal(1,"Focus wrap/audio");
-        press(4,65); // choose user image8, physical bank can be anything
+        press(4,65); // choose previous logical image; physical bank can be anything
         loading_bank=descriptor[26 +:2]; saved_loads=loads;
         @(negedge clk); key_next=0; key_audio=0;
         repeat(65) @(negedge clk); key_next=1; key_audio=1;
         repeat(65) @(negedge clk);
-        if(descriptor[23] || image_id!=7 || display_bank!=loading_bank || zoom_level!=1 || !zoom_mode)
+        if(descriptor[23] || image_id!=1 || display_bank!=loading_bank || zoom_level!=1 || !zoom_mode)
             $fatal(1,"Logical selection/confirm priority");
         repeat(500) @(negedge clk);
-        if(loads!=saved_loads || !dut.thumbnail_hold || descriptor[7:4]!=7)
+        if(loads!=saved_loads || !dut.thumbnail_hold || descriptor[7:4]!=1)
             $fatal(1,"Exit descriptor/window changed before ACK");
-        frame; fill_window; check_window(5,7);
-        if(dut.thumbnail_hold || ack_id!=7) $fatal(1,"Exit ACK");
+        frame; fill_window; check_window(0,1);
+        if(dut.thumbnail_hold || ack_id!=1) $fatal(1,"Exit ACK");
         press(2,65); press(3,65); frame;
         press(3,650);
-        if(descriptor[23] || !zoom_mode || zoom_level!=2 || image_id!=7 || pcm_mode)
+        if(descriptor[23] || !zoom_mode || zoom_level!=2 || image_id!=1 || pcm_mode)
             $fatal(1,"Cancel must preserve zoom/image");
         frame; press(3,280);
         // Two and three resources must leave only truly absent slots empty.
-        resources=16'h8001; boot; finish_load(1); frame;
+        resources=16'h0201; boot; finish_load(1); frame;
         press(3,280); press(3,65); frame;
         if(!descriptor[23] || descriptor[19:16]!=3 || descriptor[7:0]!=8'h10)
             $fatal(1,"Two-image window");
-        resources=16'h8201; boot; finish_load(1); finish_load(2); frame;
+        resources=16'h0203; boot; finish_load(1); finish_load(2); frame;
         press(3,280); press(3,65); frame;
         if(!descriptor[23] || descriptor[19:16]!=7 || descriptor[11:0]!=12'h210)
             $fatal(1,"Three-image window");
@@ -209,7 +209,7 @@ module tb_thumbnail_control;
             $fatal(1,"Single-image empty slot confirmation");
         rst=1; repeat(12) @(negedge clk);
         if(dut.thumbnail_hold || descriptor[23] || zoom_mode) $fatal(1,"Menu reset failed");
-        $display("PASS: ordered four-image window all 16 pages forward/back, edge clamping, queued entry/cancel, nonphysical slot selection, confirm priority, exit bank lock/wipe ACK, sparse/single/reset");
+        $display("PASS: ordered four-image window all 10 pages forward/back, edge clamping, queued entry/cancel, nonphysical slot selection, confirm priority, exit bank lock/wipe ACK, sparse/single/reset");
         $finish;
     end
     initial begin #20000000; $fatal(1,"Thumbnail controller timeout"); end

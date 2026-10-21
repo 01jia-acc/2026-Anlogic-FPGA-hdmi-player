@@ -75,9 +75,9 @@ module tb_multi_bmp_cache #(
             repeat(4) @(negedge clk);
             bank=write_bank;
             if(dut.load_idx!==expected[3:0]) $fatal(1,"Wrong logical load id");
-            // Check actual file selection, including sparse PIC10/PIC16 slots.
+            // Check actual file selection, including sparse high slots.
             logical=0;
-            for(slot=0;slot<16;slot=slot+1) if(resources[slot]) begin
+            for(slot=0;slot<10;slot=slot+1) if(resources[slot]) begin
                 if(logical==expected &&
                    (dut.load_cluster_lut!==clusters[slot*32 +:32] ||
                     dut.load_size_lut!==sizes[slot*32 +:32] ||
@@ -86,9 +86,9 @@ module tb_multi_bmp_cache #(
                 logical=logical+1;
             end
             if(dut.debug_playlist[63:48] !== resources ||
-               dut.debug_playlist[47:32] !== resources ||
-               dut.debug_playlist[31:24] !== logical)
-                $fatal(1,"Playlist diagnostic mask/count mismatch");
+               dut.debug_playlist[47:32] !== (resources & 16'h03ff) ||
+               dut.debug_playlist[28:24] !== (logical>10 ? 5'd10 : logical[4:0]))
+                $fatal(1,"Playlist diagnostic mask/count mismatch raw=%h saved=%h count=%0d expected=%0d",dut.debug_playlist[63:48],dut.debug_playlist[47:32],dut.debug_playlist[28:24],logical);
             if(dut.debug_playlist[15:14] !== {sizes[293], sizes[293]})
                 $fatal(1,"PIC10 saved/scanner size-bit diagnostic mismatch");
             old_id=image_id;
@@ -168,7 +168,7 @@ module tb_multi_bmp_cache #(
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=source_error;
         boot;
-        if(dut.img_found_count!=16 || loads!=4) $fatal(1,"16-resource scan/preload failed");
+        if(dut.img_found_count!=10 || loads!=4) $fatal(1,"10-resource scan/preload failed");
         // The first three cache hits must not withdraw PCM read permission.
         for(i=1;i<=3;i=i+1) begin next_key; navigate(i); end
         wait(dut.load_busy);
@@ -201,21 +201,21 @@ module tb_multi_bmp_cache #(
         wait(dut.load_busy); finish_load(6);
         if(image_id!=5) $fatal(1,"Prefetch automatically advanced picture");
 
-        // Read-ahead continues through all 16 images and the wrap to image zero.
+        // Read-ahead continues through all ten images and the wrap to image zero.
         boot;
-        for(i=1;i<16;i=i+1) begin
+        for(i=1;i<10;i=i+1) begin
             next_key; navigate(i);
-            if(dut.load_busy) finish_load((i+1)%16);
+            if(dut.load_busy) finish_load((i+1)%10);
         end
-        if(loads!=17) $fatal(1,"Full wrap did not prefetch image zero: %0d",loads);
+        if(loads!=11) $fatal(1,"Full wrap did not prefetch image zero: %0d",loads);
         saved_loads=loads;
         next_key;
         if(image_id!=0 || loads!=saved_loads) $fatal(1,"Wrapped cache hit reread card");
         frame(0); wait(dut.load_busy); finish_load(1);
-        auto_key(280); navigate(15);
-        auto_key(280); navigate(14);
-        auto_key(280); navigate(13); // A replaced previous image loads on demand.
-        if(image_id!=13) $fatal(1,"Previous demand navigation failed");
+        auto_key(280); navigate(9);
+        auto_key(280); navigate(8);
+        auto_key(280); navigate(7); // A replaced previous image loads on demand.
+        if(image_id!=7) $fatal(1,"Previous demand navigation failed");
 
         // Auto playback also crosses cache boundary and waits for each load.
         resources=16'h003f; boot;
@@ -229,15 +229,15 @@ module tb_multi_bmp_cache #(
         wait(image_id==0); frame(0); auto_key(65);
         if(dut.auto_play_en) $fatal(1,"Could not stop auto playback");
 
-        // Sparse high-number files compact to four logical images.
-        resources=16'h8211; boot;
+        // Sparse files within the ten-slot limit compact to four logical images.
+        resources=16'h0311; boot;
         if(dut.img_found_count!=4 || dut.bank_image_ids!=16'h3210 ||
            dut.image_clusters[9*32 +:32]!=1375 || dut.image_clusters[15*32 +:32]!=2053)
-            $fatal(1,"Sparse upper slots missing");
+            $fatal(1,"Sparse ten-slot list mismatch");
         for(i=1;i<=4;i=i+1) begin next_key; navigate(i%4); end
         if(loads!=4) $fatal(1,"Sparse cached navigation reloaded");
 
-        resources=16'h8000; boot;
+        resources=16'h0200; boot;
         next_key; frame(0);
         if(loads!=1 || dut.load_busy) $fatal(1,"Single image unnecessarily prefetched");
 
@@ -298,7 +298,7 @@ module tb_multi_bmp_cache #(
             wait(image_id==2); frame(2);
             if(loads!=4) $fatal(1,"Queued cached switch caused a reload");
         end
-        $display("PASS: next-image prefetch, stable background display/audio, PCM permission on hits, cached navigation during I/O, early keys, 16-image wrap, auto, sparse/single files, failure/timeout");
+        $display("PASS: next-image prefetch, stable background display/audio, PCM permission on hits, cached navigation during I/O, early keys, 10-image wrap, auto, sparse/single files, failure/timeout");
         $finish;
     end
     initial begin #30000000; $fatal(1,"Multi-BMP cache test timeout"); end

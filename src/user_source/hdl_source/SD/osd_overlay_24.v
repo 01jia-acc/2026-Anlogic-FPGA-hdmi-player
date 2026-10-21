@@ -55,7 +55,7 @@ endmodule
 // The descriptor is the SAME frame-latched packet used by the reader, so
 // focus, logical image labels and completeness cannot disagree with its RGB.
 module thumbnail_status_osd #(
-    parameter integer THUMBNAIL_DIV = 2
+    parameter integer THUMBNAIL_DIV = 4
 ) (
     input wire de,
     input wire [11:0] pixel_x, pixel_y,

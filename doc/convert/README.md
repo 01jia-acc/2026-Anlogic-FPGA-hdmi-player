@@ -1,6 +1,6 @@
 # 图片转换与 TF 卡同步
 
-当前工程支持 FAT32 卡根目录的 `PIC1.BMP`～`PIC16.BMP`，最多 16 张图片。此工具统一转换为 **640×480、24 位 RGB、无压缩 BI_RGB、正高度（bottom-up）的 BMP**。音频自行按转换后的图片编号复制为 `AUDIO1.PCM`～`AUDIO16.PCM`，例如 `PIC5.BMP` 对应 `AUDIO5.PCM`；旧 `AUDIO.PCM` 不再播放。
+当前工程支持 FAT32 卡根目录的 `PIC1.BMP`～`PIC10.BMP`，最多 10 张图片。此工具统一转换为 **640×480、24 位 RGB、无压缩 BI_RGB、正高度（bottom-up）的 BMP**。音频自行按转换后的图片编号复制为 `AUDIO1.PCM`～`AUDIO10.PCM`，例如 `PIC5.BMP` 对应 `AUDIO5.PCM`；旧 `AUDIO.PCM` 不再播放。
 
 ## 环境准备
 
@@ -34,7 +34,7 @@ python convert_images_to_bmp.py "C:\images\photo.png" "C:\images\converted\01.bm
 python sync_to_sd.py E:
 ```
 
-默认从脚本旁的 `output_bmp` 读取最多 16 张 BMP，按源文件名排序（忽略大小写），依次复制为卡根目录的 `PIC1.BMP`～`PIC16.BMP`。这是字符串排序；需要固定播放顺序时，建议源文件使用 `01.bmp`、`02.bmp`……`16.bmp`，避免 `10.bmp` 排在 `2.bmp` 前面。
+默认从脚本旁的 `output_bmp` 读取最多 10 张 BMP，按源文件名排序（忽略大小写），依次复制为卡根目录的 `PIC1.BMP`～`PIC10.BMP`。这是字符串排序；需要固定播放顺序时，建议源文件使用 `01.bmp`、`02.bmp`……`10.bmp`，避免 `10.bmp` 排在 `2.bmp` 前面。
 
 指定其他来源及同步数量：
 
@@ -42,7 +42,7 @@ python sync_to_sd.py E:
 python sync_to_sd.py E: -s "C:\images\converted" -n 8
 ```
 
-`-n` 范围为 1～16；源图片少于指定数量时，只同步现有图片。复制前会检查所有选中图片的格式和像素数据完整性，错误或空源目录会报错。
+`-n` 范围为 1～10；源图片少于指定数量时，只同步现有图片。复制前会检查所有选中图片的格式和像素数据完整性，错误或空源目录会报错。
 
 脚本只管理根目录的 `PIC1.BMP`～`PIC16.BMP`：覆盖这些名称，并删除本次同步数量之外的旧 PIC 文件；保留所有 PCM、其他文件、`PIC17.BMP` 和目录。它不复制或自动匹配音频，改变图片排序后需自行调整 PCM 编号。它不会清空整张卡，也不会破坏旧 BMP 的 `BM` 文件头。当前工程按 FAT32 目录和簇链读取，不需要处理已删除文件的物理残留。
 

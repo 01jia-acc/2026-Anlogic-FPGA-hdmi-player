@@ -149,12 +149,13 @@ module tb_multi_bmp_scanner;
             wait(done); #1;
             if(error!=want_error) $fatal(1,"Root scan error case=%0d actual=%h",kind,error);
             if(kind<=1) begin
-                if(valid!==16'hffff || audio_valid!==16'h8000 ||
-                   audio_cluster[480 +:32]!=123 || audio_size[480 +:32]!=96000 || partition!=base)
-                    $fatal(1,"16-image/root-chain/audio scan failed");
-                for(i=0;i<16;i=i+1)
+                if(valid!==16'h03ff || audio_valid!==16'h0000 || partition!=base)
+                    $fatal(1,"10-image/root-chain/audio scan failed");
+                for(i=0;i<10;i=i+1)
                     if(clusters[i*32 +:32]!=41+i || sizes[i*32 +:32]!=921655+i)
                         $fatal(1,"Wrong metadata for PIC%0d",i+1);
+                if(clusters[10*32 +:32]!=0 || sizes[10*32 +:32]!=0)
+                    $fatal(1,"PIC11 leaked into the ten-slot list");
                 if(legacy_cluster!=41 || legacy_size!=921655) $fatal(1,"Duplicate changed legacy metadata");
                 if(root_requests!=2 || fat_requests!=(kind==1 ? 2 : 1)) $fatal(1,"Incorrect root traversal");
             end
@@ -199,14 +200,14 @@ module tb_multi_bmp_scanner;
             rst_n=1; start=1;
             @(negedge clk); start=0;
             wait(done); #1;
-            if(error!=0 || valid!==16'hffff || audio_valid!==16'hffff)
+            if(error!=0 || valid!==16'h03ff || audio_valid!==16'h03ff)
                 $fatal(1,"Paired directory stopped early spc=%0d pic=%h audio=%h error=%h",spc,valid,audio_valid,error);
-            for(i=0;i<16;i=i+1) begin
+            for(i=0;i<10;i=i+1) begin
                 if(clusters[i*32 +:32]!=41+i || sizes[i*32 +:32]!=921655+i ||
                    audio_cluster[i*32 +:32]!=81+i || audio_size[i*32 +:32]!=96002+i*2)
                     $fatal(1,"Paired directory metadata mismatch spc=%0d PIC%0d",spc,i+1);
             end
-            $display("PASS: 16 interleaved PIC/PCM pairs across directory sectors, sectors/cluster=%0d",spc);
+            $display("PASS: 10 interleaved PIC/PCM pairs across directory sectors, sectors/cluster=%0d",spc);
         end
     endtask
     initial begin
