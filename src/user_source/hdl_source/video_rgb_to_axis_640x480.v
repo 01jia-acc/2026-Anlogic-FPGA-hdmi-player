@@ -44,7 +44,7 @@ always @(posedge I_clk or posedge I_rst) begin
         if (I_de) begin
             if (!S_de_1d) begin
                 // 一行首像素
-                S_x_cnt <= 11'd0;
+                S_x_cnt <= 11'd1;
                 if (S_frame_arm) begin
                     O_video_user <= 1'b1;
                     S_frame_arm  <= 1'b0;
@@ -54,8 +54,9 @@ always @(posedge I_clk or posedge I_rst) begin
                 S_x_cnt <= S_x_cnt + 11'd1;
             end
 
-            // 640x480 最后一个有效像素
-            if (S_x_cnt == 11'd639)
+            // S_x_cnt counts pixels already emitted BEFORE the current one.
+            // After pixel 0 it is 1, so pixel 639 observes 639 here.
+            if (S_de_1d && S_x_cnt == 11'd639)
                 O_video_last <= 1'b1;
         end
         else begin

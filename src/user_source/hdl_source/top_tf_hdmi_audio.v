@@ -84,7 +84,7 @@ module top(
     input                       sd_miso,       // 【输入自 TF 卡】TF 卡→FPGA 串行数据
 
     // USB-UART（板载 CH340：FPGA RXD=F12，TXD=D12）
-    input                       uart_rxd,      // 【输入自 CH340】串口接收，预留给后续命令
+    input                       uart_rxd,      // 【输入自 CH340】UTF-8字幕文本，回车提交
     output                      uart_txd       // 【输出到 CH340】串口日志 TX
 );
 
@@ -152,11 +152,15 @@ wire [7:0]  debug_load_error;
 wire [4:0] debug_load_image_number;
 wire [31:0] debug_load_cluster, debug_load_size;
 wire [63:0] debug_load_pipeline;
+wire [63:0] debug_playlist_sd;
+wire [95:0] debug_playlist_uart;
+wire debug_playlist_ready;
 wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
 wire zoom_mode_sd;
 wire [1:0] zoom_level_sd, display_zoom_level;
+wire [31:0] thumbnail_sd, display_thumbnail, thumbnail_reader_descriptor;
 wire [95:0] osd_sd_snapshot; // [11]=zoom mode, [10:9]=zoom level
 wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
@@ -416,6 +420,7 @@ end
 //   输入：按键、SD_MISO、写帧完成通知
 //   输出：SD SPI 信号、写帧请求、像素写入流、双缓冲索引
 sd_card_bmp_fat32 #(
+    .THUMBNAIL_ENABLE(1),
     .PCM_ENABLE(AUDIO_PCM_ENABLE && !AUDIO_TEST_ONLY),
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
     .SCAN_START_SECTOR (32'd0),       // 参数：从扇区 0 开始扫描
@@ -438,6 +443,7 @@ sd_card_bmp_fat32 #(
     .display_valid     (display_valid),        // 输出→top：首帧提交后允许显示
     .display_image_id(display_image_id),
     .zoom_mode(zoom_mode_sd), .zoom_level(zoom_level_sd),
+    .thumbnail_descriptor(thumbnail_sd), .thumbnail_ack_epoch(display_thumbnail[22]),
     .display_ack_valid(display_ack_valid), .display_ack_bank(display_ack_bank),
     .display_ack_image_id(display_ack_image_id),
 
@@ -473,7 +479,8 @@ sd_card_bmp_fat32 #(
     .debug_sd_state(debug_sd_state),
     .debug_sd_cmd_error(debug_sd_cmd_error),
     .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched),
-    .debug_load_pipeline(debug_load_pipeline)
+    .debug_load_pipeline(debug_load_pipeline),
+    .debug_playlist(debug_playlist_sd)
  );
 
 // ============================================================================
@@ -491,6 +498,16 @@ uart_rx #(
     .rx       (uart_rxd),
     .rx_data  (uart_rx_data),
     .rx_valid (uart_rx_valid)
+);
+
+// Read-only diagnostic mailbox: keep all playlist fields from one SD clock.
+// Both endpoints use the same reset, including before the PLL starts.
+subtitle_frame_commit u_playlist_debug_commit (
+    .src_clk(sd_card_clk), .src_rst_n(~rst_all),
+    .src_commit(debug_playlist_ready), .src_ready(debug_playlist_ready),
+    .src_text({32'd0,debug_playlist_sd}), .src_length(6'd0), .src_enable(1'b1),
+    .dst_clk(clk), .dst_rst_n(~rst_all), .frame_start(1'b1),
+    .dst_text(debug_playlist_uart), .dst_length(), .dst_enable()
 );
 
 uart_debug_logger #(
@@ -520,6 +537,7 @@ uart_debug_logger #(
     .load_image_number(debug_load_image_number),
     .load_cluster(debug_load_cluster), .load_size(debug_load_size),
     .load_pipeline(debug_load_pipeline),
+    .playlist_snapshot(debug_playlist_uart[63:0]),
     .tx             (uart_txd)
 );
 
@@ -572,6 +590,10 @@ assign video_read_req_ack = 1'b1;
 // 单周期 frame_start，reader 在下一拍锁存已经同步到 video_clk 的 buffer 索引。
 assign reader_pixel_consume = de_0;
 
+thumbnail_exit_gate u_thumbnail_exit_gate (
+    .requested(osd_sd_snapshot[43:12]), .displayed(display_thumbnail),
+    .committed_image(video_image_id), .descriptor(thumbnail_reader_descriptor)
+);
 media_frame_reader #(
     .ADDR_WIDTH          (ADDR_BITS),
     .IMAGE_WORDS         (FRAME_PIXELS),
@@ -581,7 +603,7 @@ media_frame_reader #(
     .BURST_GAP_CYCLES    (12),
     .MAX_INFLIGHT_BURSTS (2),
     .REGION_READ_ENABLE (TRANSITION_MODE == 2),
-    .ZOOM_ENABLE(1), .FRAME_WIDTH(640), .FRAME_HEIGHT(480)
+    .ZOOM_ENABLE(1), .THUMBNAIL_ENABLE(1), .FRAME_WIDTH(640), .FRAME_HEIGHT(480)
 ) u_media_frame_reader (
     .mem_clk             (ext_mem_clk),
     .mem_rst_n           (~rst_all),
@@ -601,6 +623,7 @@ media_frame_reader #(
     .new_words           (video_new_words),
     .zoom_level(video_display_changed ? 2'd1 : osd_sd_snapshot[10:9]),
     .display_zoom_level(display_zoom_level),
+    .thumbnail_descriptor(thumbnail_reader_descriptor), .display_thumbnail(display_thumbnail),
     .pixel_consume       (reader_pixel_consume),
     .pixel_rgb           (reader_pixel_rgb),
     .pixel_valid         (reader_pixel_valid),
@@ -649,6 +672,9 @@ wire osd_frame_start;
 wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
 wire [23:0] zoom_rgb;
+wire [23:0] thumbnail_rgb;
+wire [23:0] subtitle_rgb;
+wire subtitle_vs, subtitle_de;
 wire [23:0] transition_rgb;
 // 明确优先级，不把多个错误码按位OR，避免产生不存在的错误码。
 wire [7:0] osd_sd_error = (writer_memory_error != 0) ? writer_memory_error :
@@ -661,7 +687,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({84'd0,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({52'd0,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -713,8 +739,23 @@ timestamp_osd #(.CLOCK_FREQ_HZ(25_000_000)) u_timestamp_osd (
 );
 zoom_status_osd u_zoom_status (
     .clk(video_clk), .rst_n(~rst_all), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .zoom_mode(osd_sd_snapshot[11]),
-    .zoom_level(display_zoom_level), .rgb_in(timestamp_rgb), .rgb_out(zoom_rgb)
+    .pixel_x(osd_x), .pixel_y(osd_y), .zoom_mode(osd_sd_snapshot[11] && !display_thumbnail[23]),
+    .zoom_level(display_thumbnail[23] ? 2'd1 : display_zoom_level),
+    .rgb_in(timestamp_rgb), .rgb_out(zoom_rgb)
+);
+thumbnail_status_osd u_thumbnail_status (
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .descriptor(display_thumbnail), .rgb_in(zoom_rgb), .rgb_out(thumbnail_rgb)
+);
+// The final text/font RAM reads add TWO clocks to both color and video timing.
+// Scroll and text changes commit at the existing OSD VS frame boundary.
+scrolling_subtitle u_scrolling_subtitle (
+    .control_clk(clk), .pixel_clk(video_clk), .rst(rst_all),
+    .rx_data(uart_rx_data), .rx_valid(uart_rx_valid),
+    .frame_start(osd_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
+    .in_vs(vs), .in_de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .rgb_in(thumbnail_rgb), .out_vs(subtitle_vs), .out_de(subtitle_de),
+    .rgb_out(subtitle_rgb), .busy(), .rejected_lines()
 );
 
 // ============================================================================
@@ -891,9 +932,9 @@ sdram U3(
 video_rgb_to_axis_640x480 u_video_rgb_to_axis_640x480(
     .I_clk         (video_clk),       // 输入：视频像素时钟
     .I_rst         (rst_all),         // 输入：统一高有效复位
-    .I_vs          (vs),              // 输入：延迟后的场同步
-    .I_de          (osd_de),          // OSD不增加流水拍数
-    .I_rgb         (zoom_rgb),   // 状态条、运行时长和缩放状态叠加后的RGB888
+    .I_vs          (subtitle_vs),     // 与字幕ROM流水线一起延迟两拍
+    .I_de          (subtitle_de),
+    .I_rgb         (subtitle_rgb),    // 状态、倍率、缩略图与滚动字幕的最终画面
     .O_video_user  (axis_s_user),     // 输出→HDMI IP：帧起始/用户标志
     .O_video_valid (axis_s_valid),    // 输出→HDMI IP：AXIS 数据有效
     .O_video_last  (axis_s_last),     // 输出→HDMI IP：数据包/行结束标志

@@ -52,6 +52,91 @@ module osd_overlay_24 #(
     assign osd_active=hit;
 endmodule
 
+// The descriptor is the SAME frame-latched packet used by the reader, so
+// focus, logical image labels and completeness cannot disagree with its RGB.
+module thumbnail_status_osd (
+    input wire de,
+    input wire [11:0] pixel_x, pixel_y,
+    input wire [31:0] descriptor,
+    input wire [23:0] rgb_in,
+    output reg [23:0] rgb_out
+);
+    wire enabled=descriptor[23];
+    wire [1:0] slot={pixel_y>=240,pixel_x>=320};
+    wire ready=descriptor[16+slot];
+    wire focused=descriptor[21:20]==slot;
+    wire [4:0] number={1'b0,descriptor[slot*4 +:4]}+5'd1;
+    wire [11:0] lx=pixel_x-(pixel_x>=320 ? 320 : 160);
+    wire [11:0] ly=pixel_y-(pixel_y>=240 ? 240 : 120);
+    wire inside=pixel_x>=160 && pixel_x<480 && pixel_y>=120 && pixel_y<360;
+    reg [11:0] tx, ty;
+    reg [7:0] ch;
+    reg [34:0] glyph;
+    reg [4:0] bits_row;
+    reg text_area;
+    // 5x7, eight-pixel character seats. Constant shifts select ROM characters.
+    localparam [8*13-1:0] TITLE="CACHE PREVIEW";
+    localparam [8*19-1:0] HELP="2 NEXT 4 PREV 3 OK ";
+    localparam [8*10-1:0] BACK="HOLD3 BACK";
+    always @* begin
+        tx=0; ty=0; ch=" "; text_area=0;
+        if(pixel_x>=160 && pixel_x<264 && pixel_y>=96 && pixel_y<103) begin
+            tx=pixel_x-160; ty=pixel_y-96; text_area=1;
+            ch=TITLE >> ((12-tx[6:3])*8);
+        end else if(pixel_x>=160 && pixel_x<312 && pixel_y>=384 && pixel_y<391) begin
+            tx=pixel_x-160; ty=pixel_y-384; text_area=1;
+            ch=HELP >> ((18-tx[7:3])*8);
+        end else if(pixel_x>=160 && pixel_x<240 && pixel_y>=400 && pixel_y<407) begin
+            tx=pixel_x-160; ty=pixel_y-400; text_area=1;
+            ch=BACK >> ((9-tx[6:3])*8);
+        end else if(inside && lx>=8 && lx<24 && ly>=4 && ly<11) begin
+            tx=lx-8; ty=ly-4; text_area=1;
+            if(!ready) ch="-";
+            else if(tx<8) ch=number>=10 ? "1" : "0";
+            else ch="0"+(number>=10 ? number-10 : number);
+        end
+        case(ch)
+            "0":glyph={5'b01110,5'b10001,5'b10011,5'b10101,5'b11001,5'b10001,5'b01110};
+            "1":glyph={5'b00100,5'b01100,5'b00100,5'b00100,5'b00100,5'b00100,5'b01110};
+            "2":glyph={5'b01110,5'b10001,5'b00001,5'b00010,5'b00100,5'b01000,5'b11111};
+            "3":glyph={5'b11110,5'b00001,5'b00001,5'b01110,5'b00001,5'b00001,5'b11110};
+            "4":glyph={5'b00010,5'b00110,5'b01010,5'b10010,5'b11111,5'b00010,5'b00010};
+            "5":glyph={5'b11111,5'b10000,5'b10000,5'b11110,5'b00001,5'b00001,5'b11110};
+            "6":glyph={5'b01110,5'b10000,5'b10000,5'b11110,5'b10001,5'b10001,5'b01110};
+            "7":glyph={5'b11111,5'b00001,5'b00010,5'b00100,5'b01000,5'b01000,5'b01000};
+            "8":glyph={5'b01110,5'b10001,5'b10001,5'b01110,5'b10001,5'b10001,5'b01110};
+            "9":glyph={5'b01110,5'b10001,5'b10001,5'b01111,5'b00001,5'b00001,5'b01110};
+            "A":glyph={5'b01110,5'b10001,5'b10001,5'b11111,5'b10001,5'b10001,5'b10001};
+            "B":glyph={5'b11110,5'b10001,5'b10001,5'b11110,5'b10001,5'b10001,5'b11110};
+            "C":glyph={5'b01111,5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b01111};
+            "D":glyph={5'b11110,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b11110};
+            "E":glyph={5'b11111,5'b10000,5'b10000,5'b11110,5'b10000,5'b10000,5'b11111};
+            "H":glyph={5'b10001,5'b10001,5'b10001,5'b11111,5'b10001,5'b10001,5'b10001};
+            "I":glyph={5'b01110,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100,5'b01110};
+            "K":glyph={5'b10001,5'b10010,5'b10100,5'b11000,5'b10100,5'b10010,5'b10001};
+            "L":glyph={5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b11111};
+            "N":glyph={5'b10001,5'b11001,5'b10101,5'b10011,5'b10001,5'b10001,5'b10001};
+            "O":glyph={5'b01110,5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01110};
+            "P":glyph={5'b11110,5'b10001,5'b10001,5'b11110,5'b10000,5'b10000,5'b10000};
+            "R":glyph={5'b11110,5'b10001,5'b10001,5'b11110,5'b10100,5'b10010,5'b10001};
+            "T":glyph={5'b11111,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100};
+            "V":glyph={5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01010,5'b00100};
+            "W":glyph={5'b10001,5'b10001,5'b10001,5'b10101,5'b10101,5'b10101,5'b01010};
+            "X":glyph={5'b10001,5'b10001,5'b01010,5'b00100,5'b01010,5'b10001,5'b10001};
+            "-":glyph={5'b00000,5'b00000,5'b00000,5'b11111,5'b00000,5'b00000,5'b00000};
+            default:glyph=0;
+        endcase
+        bits_row=ty<7 ? glyph >> ((6-ty[2:0])*5) : 0;
+        rgb_out=rgb_in;
+        if(de && enabled) begin
+            if(inside && ly<14) rgb_out=24'h101820;
+            if(inside && (lx<2 || lx>=158 || ly<2 || ly>=118))
+                rgb_out=focused ? (ready ? 24'hffff00 : 24'hff8000) : 24'h607080;
+            if(text_area && tx[2:0]<5 && bits_row[4-tx[2:0]]) rgb_out=24'hffffff;
+        end
+    end
+endmodule
+
 // Shared output coordinates; no additional video pipeline latency.
 // Keep this module in the registered OSD source to avoid a new project entry.
 module zoom_status_osd (

@@ -45,14 +45,12 @@ rename_clock -name {hdmi_5x_clk} -source [get_ports {clk}] -master_clock {clk} [
 #      set_clock_groups -exclusive ...
 #
 #    在整合工程里，这两个时钟已经由 video_pll 产生，并通过 derive_clocks 建出来了，
-#    所以这里只保留“组关系”，不再重复 create_clock。
+#    不再重复 create_clock，也不对这两个相关时钟设置互斥分组。
 #
-#    这里沿用原作者的写法，把 video_clk 和 hdmi_5x_clk 设成 exclusive。
-#    如果后面 Timing Analyzer 明确显示两者之间需要做同步时序分析，再把这一条去掉。
+#    两者同源、同时运行，PHY 的像素暂存数据和装载脉冲跨越这两个时钟。
+#    必须保留 derive_clocks 推导的相位关系，检查真实的 setup/hold 路径。
+#    不得设置 exclusive/asynchronous，否则会屏蔽 TMDS 串行器的关键路径。
 # ------------------------------------------------------------
-set_clock_groups -exclusive \
-    -group [get_clocks {video_clk}] \
-    -group [get_clocks {hdmi_5x_clk}]
 
 
 

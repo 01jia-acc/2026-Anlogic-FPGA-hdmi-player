@@ -23,6 +23,28 @@ module hdmi_phy_wrapper#(
     wire[9:0] S_tmds_data_ch2;
     wire[9:0] S_tmds_data_clk;
 
+    // All four lanes MUST share one word boundary. The toggle launches with
+    // the falling-edge data buffers; two serial synchronizer stages followed
+    // by edge detection load the buffers 16..24ns later at a 5:1 clock ratio.
+    // The next buffer update is 40ns away (25MHz pixel / 125MHz serial).
+    reg S_pixel_toggle;
+    reg S_toggle_sync1, S_toggle_sync2, S_load_en;
+    always @(negedge I_pixel_clk or posedge I_rst) begin
+        if(I_rst) S_pixel_toggle <= 1'b0;
+        else S_pixel_toggle <= ~S_pixel_toggle;
+    end
+    always @(posedge I_serial_clk or posedge I_rst) begin
+        if(I_rst) begin
+            S_toggle_sync1 <= 1'b0;
+            S_toggle_sync2 <= 1'b0;
+            S_load_en <= 1'b0;
+        end else begin
+            S_toggle_sync1 <= S_pixel_toggle;
+            S_toggle_sync2 <= S_toggle_sync1;
+            S_load_en <= S_toggle_sync1 ^ S_toggle_sync2;
+        end
+    end
+
     assign S_tmds_data_ch0 = {I_tmds_channel_0[0],
                               I_tmds_channel_0[1],
                               I_tmds_channel_0[2],
@@ -71,6 +93,7 @@ module hdmi_phy_wrapper#(
     lane_lvds_10_1 #(
         .DEVICE ( DEVICE )    
     )u0_lane_lvds_8_1(
+        .I_load       ( S_load_en       ),
         .I_pixel_clk  ( I_pixel_clk     ),
         .I_serial_clk ( I_serial_clk    ),
         .I_rst        ( I_rst           ),
@@ -83,6 +106,7 @@ module hdmi_phy_wrapper#(
     lane_lvds_10_1 #(
         .DEVICE ( DEVICE )    
     )u1_lane_lvds_8_1(
+        .I_load       ( S_load_en       ),
         .I_pixel_clk  ( I_pixel_clk     ),
         .I_serial_clk ( I_serial_clk    ),
         .I_rst        ( I_rst           ),
@@ -95,6 +119,7 @@ module hdmi_phy_wrapper#(
     lane_lvds_10_1 #(
         .DEVICE ( DEVICE )    
     )u2_lane_lvds_8_1(
+        .I_load       ( S_load_en       ),
         .I_pixel_clk  ( I_pixel_clk     ),
         .I_serial_clk ( I_serial_clk    ),
         .I_rst        ( I_rst           ),
@@ -107,6 +132,7 @@ module hdmi_phy_wrapper#(
     lane_lvds_10_1 #(
         .DEVICE ( DEVICE )    
     )u3_lane_lvds_8_1(
+        .I_load       ( S_load_en       ),
         .I_pixel_clk  ( I_pixel_clk     ),
         .I_serial_clk ( I_serial_clk    ),
         .I_rst        ( I_rst           ),
