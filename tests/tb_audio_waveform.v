@@ -61,7 +61,7 @@ module tb_audio_waveform;
     task scan;
         input integer blocks;
         begin
-            // Write the other bank while checking the frozen visible snapshot.
+            // Audio changes during scanning must not mutate visible history.
             tap_valid=1;sample=0;
             for(yy=366;yy<434;yy=yy+1)
                 for(xx=62;xx<595;xx=xx+1) begin
@@ -76,46 +76,81 @@ module tb_audio_waveform;
             @(negedge clk);tap_valid=0;de=0;
         end
     endtask
-    integer col,blocks,previous,f;
+    integer col,blocks,f,level,target;
+    integer history[0:31];
+    task check_history;
+        begin
+            for(col=0;col<32;col=col+1) begin
+                level_at(col,blocks);
+                if(blocks!=history[col])
+                    $fatal(1,"time history column %0d got %0d expected %0d",col,blocks,history[col]);
+            end
+        end
+    endtask
+    task commit_history;
+        input integer newest;
+        integer j;
+        begin
+            for(j=0;j<31;j=j+1) history[j]=history[j+1];
+            history[31]=newest;
+            boundary;
+            check_history;
+        end
+    endtask
     initial begin
         repeat(4) @(negedge clk);rst_n=1;
         scan(1);
         @(negedge clk);rst_n=0;repeat(3) @(negedge clk);rst_n=1;
-        boundary;feed(4096,800);boundary;
-        previous=1;
-        for(col=0;col<32;col=col+1) begin
-            level_at(col,blocks);
-            if(blocks<previous || blocks>previous+1) $fatal(1,"abrupt rise between columns");
-            if(col==0 && blocks!=1) $fatal(1,"attack jumped straight to full height");
-            previous=blocks;
+        for(col=0;col<32;col=col+1) history[col]=1;
+        // Distinct levels prove newest-right ordering, shift direction, partial
+        // history masking and more than two complete circular-buffer wraps.
+        for(f=0;f<70;f=f+1) begin
+            case(f%5)
+                0: begin level=128;target=1;end
+                1: begin level=3072;target=3;end
+                2: begin level=1024;target=2;end
+                3: begin level=32768;target=4;end
+                4: begin level=2048;target=2;end
+            endcase
+            feed(level,16000);
+            check_history;
+            commit_history(target);
         end
-        if(previous<3) $fatal(1,"loud audio not visible");
-        feed(32768,800);boundary;feed(32768,800);boundary;scan(4);
-        for(f=0;f<4;f=f+1) begin feed(32768,800);boundary;end
+        feed(32768,8000);
+        for(f=0;f<32;f=f+1) begin feed(32768,800);boundary;end
+        scan(4);
+        feed(32768,8000);boundary;
         for(f=0;f<6;f=f+1) begin feed(0,800);boundary;end
         level_at(31,blocks);
         if(blocks<2 || blocks>3) $fatal(1,"release too fast or stuck");
-        for(f=0;f<8;f=f+1) begin feed(0,800);boundary;end
+        // Silence shifts old activity off the left rather than clearing it.
+        for(f=0;f<40;f=f+1) begin feed(0,800);boundary;end
         scan(1);
-        // Short impulse should be softened, not become a full-height spike.
         boundary;feed(32768,2);feed(0,798);boundary;scan(1);
-        // Moderate audio should no longer stay on three blocks.
-        for(f=0;f<5;f=f+1) begin feed(3072,800);boundary;end
-        scan(3);
-        for(f=0;f<5;f=f+1) begin feed(2048,800);boundary;end
-        scan(2);
-        for(f=0;f<5;f=f+1) begin feed(1024,800);boundary;end
-        scan(2);
-        // Low-level noise must not become a false loudness animation.
-        for(f=0;f<5;f=f+1) begin feed(128,800);boundary;end
-        scan(1);
+        feed(4096,48);boundary;level_at(31,blocks);
+        if(blocks!=1) $fatal(1,"attack not softened");
+        feed(4096,800);boundary;level_at(31,blocks);
+        if(blocks!=3) $fatal(1,"attack failed to rise");
+        // Hidden mode keeps collecting; old loud history survives stop-stream.
         enable=0;pixel(68,430);if(hit || out_rgb!==rgb) $fatal(1,"preview hiding failed");
+        feed(32768,8000);boundary;
         enable=1;
-        boundary;boundary;scan(1);
+        level_at(31,blocks);if(blocks!=4) $fatal(1,"hidden capture stopped");
+        boundary;level_at(31,blocks);if(blocks!=1) $fatal(1,"stopped stream stale newest");
+        level_at(30,blocks);if(blocks!=4) $fatal(1,"history erased on stop");
+        for(f=0;f<32;f=f+1) boundary;
+        scan(1);
         @(negedge clk);rst_n=0;repeat(3) @(negedge clk);rst_n=1;
         scan(1);
-        $display("PASS: segmented bars, signed full scale, amplitude ordering, smooth attack/slow release, softened impulse, exact gaps/colors, bank stability, silence/hide/reset");
+        // A sample coincident with VS must be appended, not lost.
+        @(negedge clk);rst_n=0;repeat(3) @(negedge clk);rst_n=1;
+        feed(767,8000);boundary;
+        @(negedge clk);vs=0;tap_valid=1;sample=32767;
+        @(negedge clk);tap_valid=0;vs=1;
+        repeat(4) @(negedge clk);
+        level_at(31,blocks);if(blocks!=2) $fatal(1,"boundary sample lost");
+        $display("PASS: chronological left scroll, newest right, wrap/startup, frame stability, amplitude/smoothing, silence/stop/hide/reset, boundary sample, exact pixels");
         $finish;
     end
-    initial begin #100000000; $fatal(1,"waveform timeout");end
+    initial begin #500000000; $fatal(1,"waveform timeout");end
 endmodule

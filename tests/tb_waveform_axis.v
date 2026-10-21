@@ -37,14 +37,24 @@ module tb_waveform_axis;
     reg [4:0] vp=0,lp=0,up=0;
     reg arm=1,prev_vs=1;
     integer i,pixels=0,lines=0,frames=0,blocks=2;
+    integer history[0:31];
+    integer h,column_blocks;
     reg [23:0] golden;
     always @(posedge clk) begin
-        if(rst) begin vp=0;lp=0;up=0;arm=1;prev_vs=vs;end
+        if(rst) begin
+            vp=0;lp=0;up=0;arm=1;prev_vs=vs;
+            for(h=0;h<32;h=h+1) history[h]=1;
+        end
         else begin
             if(vs!=prev_vs) arm=1;
+            if(prev_vs && !vs) begin
+                for(h=0;h<31;h=h+1) history[h]=history[h+1];
+                history[31]=blocks;
+            end
             prev_vs=vs;
             golden=rgb;
-            if(enable && de && x>=64 && x<576 && y>=432-blocks*8 && y<432 &&
+            column_blocks=(x>=64 && x<576) ? history[(x-64)/16] : 1;
+            if(enable && de && x>=64 && x<576 && y>=432-column_blocks*8 && y<432 &&
                 (x-64)%16>=2 && (x-64)%16<14 && (431-y)%8<4)
                 golden=(431-y)%8==3 ? 24'hb8f438 : 24'h20ee70;
             for(i=4;i>0;i=i-1) colors[i]=colors[i-1];
@@ -64,7 +74,7 @@ module tb_waveform_axis;
     integer f,xx,yy;
     initial begin
         repeat(4) @(negedge clk);rst=0;
-        // Settle real 48kHz attack, then fill a stable 32x24 sample window.
+        // Settle real 48kHz attack, then append snapshots at VS boundaries.
         repeat(1000000) @(negedge clk);
         vs=0;repeat(5) @(negedge clk);vs=1;
         repeat(420000) @(negedge clk);
@@ -84,15 +94,16 @@ module tb_waveform_axis;
             if(f==0) pcm_valid=0;
             repeat(20) @(negedge clk);
             if(f==1) begin
-                // Allow the intentionally slow release, then replace old capture.
+                // Allow slow release; new silence must retain older columns.
                 repeat(3000000) @(negedge clk);
+                blocks=1;
                 vs=0;repeat(5) @(negedge clk);vs=1;
                 repeat(420000) @(negedge clk);
             end
         end
         if(pixels!=3*640*480 || lines!=1440 || frames!=3)
             $fatal(1,"frame counts pixels=%0d lines=%0d frames=%0d",pixels,lines,frames);
-        $display("PASS: actual HDMI gain and missing-PCM silence, waveform/subtitle 640x480 RGB, preview hiding, SOF and TLAST");
+        $display("PASS: actual HDMI gain, scrolling history with silent tail, waveform/subtitle 640x480 RGB, preview hiding, SOF and TLAST");
         $finish;
     end
     initial begin #300000000; $fatal(1,"AXIS timeout");end
