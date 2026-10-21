@@ -1,11 +1,12 @@
 `timescale 1ns/1ps
 // Real reader, row RAM, async FIFO and prefetch; memory returns ordered data.
 module tb_image_zoom #(
-    parameter integer WIDTH=24, HEIGHT=12, BURST=4, FIFO_DEPTH=64, STALLS=0
+    parameter integer WIDTH=24, HEIGHT=12, BURST=4, FIFO_DEPTH=64, STALLS=0,
+    parameter integer MEM_HALF_NS=4
 );
     localparam integer WORDS=WIDTH*HEIGHT, AW=$clog2(WORDS*4);
     reg mem_clk=0, pix_clk=0, rst=1;
-    always #4 mem_clk=~mem_clk;
+    always #(MEM_HALF_NS) mem_clk=~mem_clk;
     always #20 pix_clk=~pix_clk;
     reg start=0, consume=0;
     reg [1:0] level=1, bank=3, old_bank=0;

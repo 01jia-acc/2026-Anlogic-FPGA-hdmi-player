@@ -51,6 +51,10 @@ module sd_fat32_image_source #(
     // 允许启动/恢复PCM；让出事务入口后，读图期间仍按整扇区补充已启动的PCM。
     input wire pcm_play_enable,
     input wire pixel_clk,
+    // 像素域实际提交的图片；load_start（含后台预读）绝不能触发换音。
+    input wire [3:0] pcm_image_id_pix,
+    input wire pcm_commit_toggle_pix,
+    output reg pcm_commit_ack,
     input wire pcm_ready,
     output wire signed [15:0] pcm_sample,
     output wire pcm_valid,
@@ -111,12 +115,16 @@ module sd_fat32_image_source #(
     output wire [8:0]  debug_sector_byte_count,
     output wire        debug_sector_active,
     output wire [15:0] debug_sector_done_count,
-    output wire [3:0]  debug_resource_valid,
-    output wire        debug_pic10_size_bit5,
+    output wire [15:0] debug_resource_valid,
+    output wire [31:0] debug_root_crc,
+    output wire [15:0] debug_root_bytes,
+    output wire debug_pic10_size_bit5,
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
     output wire        debug_sd_cmd_error_latched,
-    output wire [63:0] debug_load_pipeline
+    output wire [63:0] debug_load_pipeline,
+    output wire [31:0] debug_accepted_cluster,
+    output wire [159:0] debug_pcm_status
 );
     // ========================================================================
     // 内部 wire：SD 原始驱动的单块读接口（只连接 adapter 与 sd_card_top）
@@ -186,7 +194,7 @@ module sd_fat32_image_source #(
     wire scanner_scan_busy;         // 电平：scanner 正在扫描（仲裁依据）
     wire [3:0] scanner_debug_state;
     wire [15:0] scanner_debug_sector_done_count;
-    wire [3:0] scanner_debug_resource_valid;
+    wire [15:0] scanner_debug_resource_valid;
     // ---- streamer 的文件字节流输出 ----
     wire streamer_file_busy;        // 电平：streamer 正在读文件
     wire streamer_file_done;        // 事件：文件字节全部读完（file_end 给 decoder）
@@ -199,8 +207,25 @@ module sd_fat32_image_source #(
     wire [31:0] data_start_lba;     // 数据区第一个扇区的 LBA（簇 2 从这里开始）
     wire [7:0] sectors_per_cluster; // 每簇扇区数（2 的幂）
     wire [31:0] max_cluster;        // 卷上最大合法簇号（防坏链越界）
-    wire audio_resource_valid;
-    wire [31:0] audio_cluster, audio_size;
+    wire [15:0] audio_resource_valid;
+    wire [511:0] audio_clusters, audio_sizes;
+    reg [31:0] audio_cluster, audio_size;
+    reg audio_selected;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] audio_image_meta, audio_image_sync;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] audio_commit_sync;
+    reg audio_commit_seen;
+    reg [3:0] audio_image_q, audio_lookup_slot, audio_lookup_index;
+    reg [2:0] audio_switch_state;
+    reg audio_clear;
+    wire audio_clear_ack;
+    wire audio_image_changed = PCM_ENABLE && audio_commit_sync[2] != audio_commit_seen;
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin audio_image_meta<=0; audio_image_sync<=0; audio_commit_sync<=0; end
+        else begin
+            audio_image_meta<=pcm_image_id_pix; audio_image_sync<=audio_image_meta;
+            audio_commit_sync<={audio_commit_sync[1:0],pcm_commit_toggle_pix};
+        end
+    end
     wire pcm_sector_ready, pcm_overflow;
     wire audio_sector_req, audio_file_busy, audio_file_done, audio_file_valid;
     wire [31:0] audio_sector_lba;
@@ -211,6 +236,15 @@ module sd_fat32_image_source #(
     wire audio_channel_busy;
     reg audio_attempted, audio_start, audio_done, audio_abort;
     reg scan_usable;
+    wire [31:0] pcm_sample_counter;
+    // 只读低频诊断：文件掩码、控制标志、图片/文件槽/错误、首簇、大小、
+    // 像素域已消耗样本数和当前样本。跨域计数仅用于观察是否持续变化。
+    assign debug_pcm_status = {audio_resource_valid,
+        pcm_play_enable, audio_selected, audio_running, audio_attempted,
+        audio_switch_state, audio_commit_seen, pcm_commit_ack, audio_commit_sync[2],
+        audio_clear, audio_clear_ack, pcm_active, pcm_valid, pcm_ready, pcm_overflow,
+        audio_image_q, audio_lookup_slot, pcm_error, audio_cluster, audio_size,
+        pcm_sample_counter, pcm_sample};
     reg [31:0] audio_wait_count;
     // ---- decoder 的输出 ----
     wire decoder_header_accepted;   // BMP 头解析通过
@@ -281,6 +315,7 @@ module sd_fat32_image_source #(
     // 外壳级三状态：空闲、等待写端确认、文件字节/像素流传输。
     // 锁存一次 load_start 提供的资源参数，避免上层改变输入影响正在进行的读。
     reg [31:0] load_cluster_q;      // 本次加载事务的首簇号（冻结副本）
+    assign debug_accepted_cluster = load_cluster_q;
     reg [31:0] load_size_q;         // 本次加载事务的字节数（冻结副本）
     // 送给 streamer/decoder 的一拍启动脉冲。
     reg streamer_start;             // 事件：启动文件流
@@ -296,6 +331,7 @@ module sd_fat32_image_source #(
         5'd0, byte_count, next_decode_offset};
     wire audio_fault;
     wire audio_read_allowed = audio_running && !audio_fault &&
+        audio_switch_state==0 && !audio_image_changed &&
         (source_state == SOURCE_STREAM ||
          (source_state == SOURCE_AUDIO && pcm_play_enable));
     assign audio_channel_busy = sector_busy || !pcm_sector_ready ||
@@ -450,7 +486,7 @@ module sd_fat32_image_source #(
     // ========================================================================
     // 实例③：fat32_volume_scanner —— FAT32 卷扫描器（scan 事务的执行者）
     // ========================================================================
-    // 职责：读 LBA0/BPB → 沿根目录簇链找 PIC1~PIC16.BMP 和 AUDIO.PCM →
+    // 职责：读 LBA0/BPB → 沿根目录簇链找 PIC1~PIC16.BMP 和 AUDIO1~16.PCM →
     // 输出资源表（首簇+大小）和文件系统几何参数。
     // 注意 rst_n 接 ~rst：scanner 内部是低有效复位，本模块是高有效。
     fat32_volume_scanner u_volume_scanner (
@@ -480,12 +516,14 @@ module sd_fat32_image_source #(
         .resource2_size       (resource2_size),
         .resource3_size       (resource3_size),
         .audio_resource_valid (audio_resource_valid),
-        .audio_cluster        (audio_cluster),
-        .audio_size           (audio_size),
+        .audio_cluster        (audio_clusters),
+        .audio_size           (audio_sizes),
         .debug_state          (scanner_debug_state),
         .debug_sector_done_count(scanner_debug_sector_done_count),
         .debug_resource_valid (scanner_debug_resource_valid),
         .debug_pic10_size_bit5(debug_pic10_size_bit5),
+        .debug_root_crc(debug_root_crc),
+        .debug_root_bytes(debug_root_bytes),
         // 扇区通道（scanner 侧，经仲裁 mux 接共享通道）
         .sector_req           (scanner_sector_req),
         .sector_lba           (scanner_sector_lba),
@@ -614,13 +652,14 @@ module sd_fat32_image_source #(
     //   解码（进 SOURCE_STREAM），最后等 decoder_done 收尾。
     pcm_stream_buffer #(.ADDR_WIDTH(PCM_FIFO_ADDR_WIDTH)) u_pcm_buffer (
         .wr_clk(clk), .rd_clk(pixel_clk), .rst(rst),
+        .stream_clear(audio_clear), .clear_ack(audio_clear_ack),
         .stream_start(audio_start), .stream_done(audio_done),
         .prefill_done(audio_file_done),
         .byte_valid(audio_file_valid),
         .byte_data(audio_file_byte), .sector_ready(pcm_sector_ready),
         .overflow(pcm_overflow), .sample(pcm_sample), .sample_valid(pcm_valid),
         .sample_ready(pcm_ready), .stream_active(pcm_active),
-        .stream_end(pcm_end), .underflow(pcm_underflow), .sample_counter()
+        .stream_end(pcm_end), .underflow(pcm_underflow), .sample_counter(pcm_sample_counter)
     );
 
     always @(posedge clk or posedge rst) begin
@@ -639,6 +678,9 @@ module sd_fat32_image_source #(
             audio_attempted <= 0; audio_running <= 0; audio_streamer_start <= 0;
             audio_start <= 0; audio_done <= 0; audio_abort <= 0;
             audio_wait_count <= 0; pcm_error <= 0; scan_usable <= 0;
+            audio_commit_seen<=0; pcm_commit_ack<=0; audio_image_q<=0;
+            audio_lookup_slot<=0; audio_lookup_index<=0; audio_switch_state<=0;
+            audio_clear<=0; audio_selected<=0; audio_cluster<=0; audio_size<=0;
         end else begin
             // ------------------------------------------------------------------
             // 每拍开头：脉冲类输出默认清零（条件满足才置 1，最多维持一拍）
@@ -653,7 +695,7 @@ module sd_fat32_image_source #(
                 audio_wait_count <= audio_wait_count + 1'b1;
             else audio_wait_count <= 0;
 
-            if (audio_running) begin
+            if (audio_running && audio_switch_state==0 && !audio_image_changed) begin
                 if (audio_fault) begin
                     audio_done <= 1;
                     audio_running <= 0;
@@ -665,6 +707,14 @@ module sd_fat32_image_source #(
                     // EOF 连续循环；暂停期间启动只进入请求等待，不抢占 BMP 通道。
                     audio_streamer_start <= 1;
                 end
+            end
+
+            // 图片已经提交才选音频。读图阶段也允许启动，首图无需等四张全部预载。
+            if(PCM_ENABLE && scan_usable && audio_selected && !audio_attempted &&
+               audio_switch_state==0 && !audio_image_changed &&
+               (pcm_play_enable || source_state==SOURCE_STREAM)) begin
+                audio_attempted<=1; audio_streamer_start<=1;
+                audio_start<=1; audio_running<=1;
             end
 
             // ------------------------------------------------------------------
@@ -692,19 +742,8 @@ module sd_fat32_image_source #(
                             load_error <= 8'h00;
                             source_state <= SOURCE_ACK;
                         end else if (PCM_ENABLE && pcm_play_enable && scan_usable && source_ready &&
-                                     (!audio_attempted || audio_running) && !audio_fault) begin
+                                     audio_running && audio_switch_state==0 && !audio_image_changed && !audio_fault) begin
                             source_state <= SOURCE_AUDIO;
-                            if (!audio_attempted) begin
-                                audio_attempted <= 1;
-                                if (audio_resource_valid && audio_size != 0 && !audio_size[0]) begin
-                                    audio_streamer_start <= 1;
-                                    audio_start <= 1;
-                                    audio_running <= 1;
-                                end else begin
-                                    source_state <= SOURCE_IDLE;
-                                    if (audio_resource_valid) pcm_error <= 8'h71;
-                                end
-                            end
                         end
                     end
 
@@ -762,6 +801,48 @@ module sd_fat32_image_source #(
             // 错误退出优先于正常音频状态，避免同拍 case 覆盖退出动作。
             if (audio_fault && source_state == SOURCE_AUDIO)
                 source_state <= SOURCE_IDLE;
+
+            // 换音先停止新请求，等旧音频整扇区结束再中止文件流。
+            // 双时钟FIFO清空必须完成双向握手，防止旧样本或旧Gray指针混入新文件。
+            case(audio_switch_state)
+                1: if(sector_owner!=CHANNEL_PCM && !audio_sector_req) begin
+                    audio_abort<=1; audio_switch_state<=2;
+                    if(source_state==SOURCE_AUDIO) source_state<=SOURCE_IDLE;
+                end
+                2: if(audio_clear_ack && !audio_file_busy) begin
+                    audio_clear<=0; audio_switch_state<=3;
+                end
+                3: if(!audio_clear_ack) begin
+                    audio_lookup_slot<=0; audio_lookup_index<=0; audio_switch_state<=4;
+                end
+                // 逐拍把播放序号映射回PIC文件名槽，因此PIC1/PIC5/PIC16缺号也匹配正确。
+                4: if(scan_usable) begin
+                    if(resource_valid[audio_lookup_slot] && audio_lookup_index==audio_image_q) begin
+                        audio_cluster<=audio_clusters[audio_lookup_slot*32 +:32];
+                        audio_size<=audio_sizes[audio_lookup_slot*32 +:32];
+                        audio_selected<=audio_resource_valid[audio_lookup_slot];
+                        audio_switch_state<=5;
+                    end else if(audio_lookup_slot==15) audio_switch_state<=5;
+                    else begin
+                        audio_lookup_slot<=audio_lookup_slot+1'b1;
+                        if(resource_valid[audio_lookup_slot]) audio_lookup_index<=audio_lookup_index+1'b1;
+                    end
+                end
+                5: begin
+                    if(audio_selected && (audio_size==0 || audio_size[0])) begin
+                        audio_selected<=0; pcm_error<=8'h71;
+                    end
+                    pcm_commit_ack<=audio_commit_seen;
+                    audio_switch_state<=0;
+                end
+                default: ;
+            endcase
+            // 新提交优先，快速切图只保留最近实际显示的图片。
+            if(audio_image_changed) begin
+                audio_commit_seen<=audio_commit_sync[2]; audio_image_q<=audio_image_sync;
+                audio_switch_state<=1; audio_clear<=1;
+                audio_running<=0; audio_selected<=0; audio_attempted<=0; pcm_error<=0;
+            end
         end
     end
 endmodule

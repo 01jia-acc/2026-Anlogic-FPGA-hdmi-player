@@ -114,11 +114,26 @@ module media_frame_reader #(
         (zoom_x<FRAME_WIDTH/4 || zoom_x>=FRAME_WIDTH*3/4 ||
          zoom_y<FRAME_HEIGHT/4 || zoom_y>=FRAME_HEIGHT*3/4);
     wire zoom_room, zoom_write;
+    // 行 RAM 同步读一拍：输出当前像素时预取下一像素。FIFO 反压时
+    // 同时保持地址、行 RAM 输出和坐标，恢复后不会重复或跳过像素。
+    wire [15:0] zoom_next_source_x = thumbnail_active ?
+        (zoom_x==FRAME_WIDTH/2-1 ? 16'd0 :
+         (zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
+             zoom_source_x+16'd4 : zoom_source_x) : frame_zoom_mem==0 ?
+        ((zoom_x>=FRAME_WIDTH/4 && zoom_x<FRAME_WIDTH*3/4-1) ?
+            zoom_source_x+16'd2 : zoom_source_x) :
+        frame_zoom_mem==2 ? (zoom_x_phase>=1 ? zoom_source_x+16'd1 : zoom_source_x) :
+        frame_zoom_mem==3 ? (zoom_x[0] ? zoom_source_x+16'd1 : zoom_source_x) : zoom_source_x;
+    wire [LINE_AW-1:0] zoom_ram_read_address = zoom_state==Z_ADDRESS ?
+        zoom_source_x[LINE_AW-1:0] : zoom_next_source_x[LINE_AW-1:0];
+    wire zoom_ram_read_enable = (zoom_active && zoom_state==Z_ADDRESS && zoom_room) ||
+        (zoom_write && zoom_x!=FRAME_WIDTH-1);
     always @(posedge mem_clk) begin
         if(zoom_active && sdram_rd_valid && reader_busy && !reload_pending_mem)
             zoom_line[zoom_row_returned[LINE_AW-1:0]]<=sdram_rd_data[31:8];
-        if(zoom_active && zoom_state==Z_ADDRESS && zoom_room)
-            zoom_line_q<=zoom_line[zoom_source_x[LINE_AW-1:0]];
+        // 单一 RAM 读口；把地址选择放在端口外，保证 TD 推断为 BRAM。
+        if(zoom_ram_read_enable)
+            zoom_line_q<=zoom_line[zoom_ram_read_address];
     end
     // synthesis translate_off
     always @(posedge pix_clk) begin
@@ -161,7 +176,16 @@ module media_frame_reader #(
     wire fifo_almost_full;
     wire [FIFO_COUNT_W-1:0] fifo_wrusedw;
     assign zoom_room = !fifo_full && fifo_wrusedw<FIFO_DEPTH-FIFO_MARGIN;
-    assign zoom_write = zoom_active && reader_busy && zoom_state==Z_PUSH && !fifo_reset;
+    // Stream thumbnail samples while the rest of the source row is arriving.
+    // Waiting for both complete rows before emitting costs > one VGA line at
+    // 50 MHz. Keep contiguous SDRAM bursts and reuse the same single row RAM.
+    wire thumbnail_sample_ready = !thumbnail_active || !thumbnail_row_valid ||
+        ((zoom_row_returned > zoom_source_x) &&
+         (zoom_x==FRAME_WIDTH/2-1 || zoom_x==FRAME_WIDTH-1 ?
+             zoom_row_returned==FRAME_WIDTH :
+             zoom_row_returned > zoom_next_source_x));
+    assign zoom_write = zoom_active && reader_busy && zoom_state==Z_PUSH && zoom_room &&
+                        !fifo_reset && thumbnail_sample_ready;
     wire [31:0] fifo_raw_data;
     wire fifo_raw_valid;
     wire fifo_raw_read_en;
@@ -197,7 +221,7 @@ module media_frame_reader #(
                        burst_gap_count_mem == 0 &&
                        (thumbnail_active || issued_count_mem != IMAGE_WORDS) &&
                        inflight_window_ok_q && (zoom_active ?
-                           (zoom_state==Z_READ && zoom_row_issued<FRAME_WIDTH &&
+                           ((zoom_state==Z_READ || thumbnail_active) && zoom_row_issued<FRAME_WIDTH &&
                             (!thumbnail_active || thumbnail_row_valid)) : fifo_reservation_ok_q);
     wire issue_allowed = !DIAG_SYNTH_STREAM && reader_busy && burst_active_mem;
     // reader_busy 表示“整帧读取事务仍未完成”，不能直接拿来做 SDRAM
@@ -447,7 +471,10 @@ module media_frame_reader #(
                 returned_count_mem <= returned_count_mem + 1'b1;
                 if(zoom_active) begin
                     zoom_row_returned<=zoom_row_returned+1'b1;
-                    if(zoom_row_returned==FRAME_WIDTH-1) zoom_state<=Z_ADDRESS;
+                    if(thumbnail_active) begin
+                        if(zoom_state==Z_READ && zoom_row_returned==1)
+                            zoom_state<=Z_ADDRESS;
+                    end else if(zoom_row_returned==FRAME_WIDTH-1) zoom_state<=Z_ADDRESS;
                 end else if (fifo_full) begin
                     reader_busy <= 1'b0;
                     burst_active_mem <= 1'b0;
@@ -468,7 +495,6 @@ module media_frame_reader #(
                 if(zoom_state==Z_ADDRESS && zoom_room && !fifo_reset && fifo_ready_mem[1])
                     zoom_state<=Z_PUSH;
                 if(zoom_write) begin
-                    zoom_state<=Z_ADDRESS;
                     if(zoom_x==FRAME_WIDTH-1) begin
                         zoom_x<=0; zoom_x_phase<=0;
                         zoom_source_x<=thumbnail_active ? 0 : frame_zoom_mem==2 ? FRAME_WIDTH/6 :

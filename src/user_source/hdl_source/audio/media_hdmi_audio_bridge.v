@@ -17,6 +17,7 @@ module media_hdmi_audio_bridge #(
     input  wire        commit_toggle_sd,
     input wire pcm_active, pcm_valid,
     input wire pcm_mode_sd,
+    input wire pcm_commit_ack_sd,
     input wire signed [15:0] stream_sample,
     output wire pcm_ready,
     output reg         audio_valid,
@@ -73,12 +74,18 @@ module media_hdmi_audio_bridge #(
     wire signed [15:0] test_sample;
     wire signed [15:0] media_sample;
     (* ASYNC_REG = "TRUE" *) reg [1:0] pcm_mode_sync;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] pcm_ack_sync;
     always @(posedge pixel_clk or posedge rst)
-        if (rst) pcm_mode_sync <= 0;
-        else pcm_mode_sync <= {pcm_mode_sync[0], pcm_mode_sd};
-    wire use_pcm = PCM_ENABLE && !TEST_ONLY && pcm_mode_sync[1] && pcm_active;
+        if (rst) begin pcm_mode_sync <= 0; pcm_ack_sync<=0; end
+        else begin
+            pcm_mode_sync <= {pcm_mode_sync[0], pcm_mode_sd};
+            pcm_ack_sync <= {pcm_ack_sync[0],pcm_commit_ack_sd};
+        end
+    wire pcm_selected = PCM_ENABLE && !TEST_ONLY && pcm_mode_sync[1];
+    wire use_pcm = pcm_selected && pcm_active && pcm_ack_sync[1]==commit_toggle_sd;
     assign pcm_ready = sample_tick && use_pcm;
-    wire signed [15:0] selected_sample = use_pcm ? (pcm_valid ? stream_sample : 16'sd0) :
+    // PCM模式缺文件、换音或欠载时静音，不自动回退琶音或测试音。
+    wire signed [15:0] selected_sample = pcm_selected ? (use_pcm && pcm_valid ? stream_sample : 16'sd0) :
                                        use_media ? media_sample : test_sample;
     wire signed [24:0] scaled_sample = selected_sample * $signed({1'b0, VOLUME});
     // Gain is 0..255 / 256, so even full-scale signed file samples cannot clip.

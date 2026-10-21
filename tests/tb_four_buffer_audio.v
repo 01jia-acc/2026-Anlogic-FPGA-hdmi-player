@@ -138,6 +138,9 @@ module tb_four_buffer_audio;
         force control.scan_done=scan_done;
         force control.scan_error=8'd0;
         force control.resource_valid=resources;
+        // Scheduler now reads the scanner's single packed resource table.
+        force control.resource_clusters={384'd0,32'd40,32'd30,32'd20,32'd10};
+        force control.resource_sizes={384'd0,{4{32'd921654}}};
         force control.resource0_cluster=32'd10;
         force control.resource1_cluster=32'd20;
         force control.resource2_cluster=32'd30;

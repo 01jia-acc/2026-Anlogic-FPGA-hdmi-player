@@ -10,6 +10,8 @@ module tb_pcm_file #(
     always #5 clk=~clk;
     always #7 pixel_clk=~pixel_clk;
     reg scan=0, allow_play=0, mode=0, image_start=0;
+    reg audio_commit=0;
+    wire audio_ack;
     wire image_done, image_write, image_commit;
     wire [31:0] image_data;
     wire [7:0] image_error;
@@ -31,6 +33,7 @@ module tb_pcm_file #(
     sd_fat32_image_source #(.PCM_ENABLE(1), .PCM_FIFO_ADDR_WIDTH(9),
         .PCM_SECTOR_TIMEOUT(2048)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(ready),
+        .pcm_image_id_pix(4'd0), .pcm_commit_toggle_pix(audio_commit), .pcm_commit_ack(audio_ack),
         .pcm_play_enable(allow_play), .pcm_sample(sample), .pcm_valid(valid),
         .pcm_active(active), .pcm_end(ended), .pcm_underflow(underflow), .pcm_error(error),
         .scan_start(scan), .scan_done(scan_done), .load_start(image_start), .load_abort(1'b0),
@@ -40,7 +43,8 @@ module tb_pcm_file #(
     );
     media_hdmi_audio_bridge #(.CLOCK_HZ(4_800_000), .PCM_ENABLE(1), .VOLUME(128)) bridge (
         .pixel_clk(pixel_clk), .rst(rst), .display_valid_sd(1'b1),
-        .media_id_sd(2'd0), .commit_toggle_sd(1'b0), .pcm_mode_sd(mode),
+        .media_id_sd(2'd0), .commit_toggle_sd(audio_commit), .pcm_mode_sd(mode),
+        .pcm_commit_ack_sd(audio_ack),
         .pcm_active(active), .pcm_valid(valid), .stream_sample(sample), .pcm_ready(ready),
         .audio_valid(audio_valid), .audio_left_data(audio_left), .audio_right_data(audio_right)
     );
@@ -68,7 +72,7 @@ module tb_pcm_file #(
             disk[0]=8'heb; disk[12]=2; disk[13]=1; disk[14]=1; disk[16]=1;
             put32(32,kind==8 ? 2048 : 32); put32(36,kind==8 ? 16 : 1); put32(44,2);
             disk[510]=8'h55; disk[511]=8'haa;
-            // Four images followed by AUDIO.PCM, all in the first root cluster.
+            // Four images followed by AUDIO1.PCM, all in the first root cluster.
             for(i=0;i<4;i=i+1) begin
                 n=(kind==8 ? 8704 : 1024)+i*32;
                 disk[n]="P"; disk[n+1]="I"; disk[n+2]="C"; disk[n+3]="1"+i;
@@ -78,7 +82,7 @@ module tb_pcm_file #(
             end
             n=(kind==8 ? 8704 : 1024)+128;
             disk[n]="A"; disk[n+1]="U"; disk[n+2]="D"; disk[n+3]="I"; disk[n+4]="O";
-            disk[n+5]=" "; disk[n+6]=" "; disk[n+7]=" ";
+            disk[n+5]="1"; disk[n+6]=" "; disk[n+7]=" ";
             disk[n+8]="P"; disk[n+9]="C"; disk[n+10]="M";
             disk[n+11]=8'h20; disk[n+26]=3; put32(n+28,samples*2);
             if(kind==1) disk[n]=8'he5; // deleted
@@ -196,6 +200,7 @@ module tb_pcm_file #(
         input integer samples,kind,want_samples,want_error;
         begin
             @(negedge clk); rst=1; allow_play=0; scan=0; mode=0;
+            audio_commit=0;
             received=0; expected=want_samples; blocked=0; stall=(kind==6);
             image_start=0; image_pixels=0; image_commits=0; interleaved_audio=0;
             loop_samples=samples; run_kind=kind; file_passes=0;
@@ -207,6 +212,7 @@ module tb_pcm_file #(
             if(kind!=4 && dut.resource_valid!==4'b1111) $fatal(1,"Picture lookup regression");
             repeat(40) @(negedge clk);
             if(active) $fatal(1,"PCM started before preload permission");
+            audio_commit=1;
             allow_play=1;
             if(want_samples>0) begin
                 wait(active); mode=1;
@@ -254,6 +260,7 @@ module tb_pcm_file #(
         input [7:0] expected_error;
         begin
             @(negedge clk); rst=1; allow_play=0; scan=0; mode=0;
+            audio_commit=0;
             received=0; image_start=0; image_pixels=0; image_commits=0;
             run_kind=8; stall=0; prepare(3102,8);
             put32(512+32*4,next_cluster);

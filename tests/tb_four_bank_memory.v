@@ -2,10 +2,10 @@
 // Real loader, command CDC, reader and vendor FIFO RTL; only SDRAM is modeled.
 // Small frames make every address/data comparison practical. This is not a
 // physical SDRAM timing model or a 640x480 video bandwidth qualification.
-module tb_four_bank_memory;
+module tb_four_bank_memory #(parameter integer MEM_HALF_NS=4);
     reg src_clk=0, mem_clk=0, pix_clk=0, rst_n=0;
     always #5 src_clk=~src_clk;
-    always #4 mem_clk=~mem_clk;
+    always #(MEM_HALF_NS) mem_clk=~mem_clk;
     always #20 pix_clk=~pix_clk;
     reg load_start=0, pixel_valid=0, frame_commit=0;
     reg [1:0] image_index=0, read_index=0;

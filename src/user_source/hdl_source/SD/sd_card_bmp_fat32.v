@@ -20,6 +20,9 @@ module sd_card_bmp_fat32 #(
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
     input  wire        rst,            // 高有效复位
     input wire pixel_clk, pcm_ready,
+    input wire [3:0] pcm_image_id_pix,
+    input wire pcm_commit_toggle_pix,
+    output wire pcm_commit_ack,
     output wire signed [15:0] pcm_sample,
     output wire pcm_valid, pcm_active, pcm_end, pcm_underflow,
     output wire [7:0] pcm_error,
@@ -87,6 +90,7 @@ module sd_card_bmp_fat32 #(
     output wire [7:0]  debug_load_error,
     output wire [4:0]  debug_load_image_number,
     output wire [31:0] debug_load_cluster,
+    output wire [31:0] debug_source_cluster,
     output wire [31:0] debug_load_size,
     // FAT/SD 细粒度诊断观察口，供顶层 UART 周期打印。
     output wire [3:0]  debug_scanner_state,
@@ -94,12 +98,16 @@ module sd_card_bmp_fat32 #(
     output wire [8:0]  debug_sector_byte_count,
     output wire        debug_sector_active,
     output wire [15:0] debug_sector_done_count,
-    output wire [3:0]  debug_resource_valid,
+    output wire [15:0] debug_resource_valid,
+    output wire [4:0] debug_image_count,
+    output wire [31:0] debug_root_crc,
+    output wire [15:0] debug_root_bytes,
     output wire [4:0]  debug_sd_state,
     output wire        debug_sd_cmd_error,
     output wire        debug_sd_cmd_error_latched,
     output wire [63:0] debug_load_pipeline,
-    output wire [63:0] debug_playlist
+    output wire [63:0] debug_playlist,
+    output wire [159:0] debug_pcm_status
 );
 
     // 最多16个目录资源，四个bank只作缓存。文件完成与SDRAM写完同时满足才提交。
@@ -111,7 +119,8 @@ module sd_card_bmp_fat32 #(
     wire debug_pic10_size_bit5;
     wire [31:0] resource0_cluster, resource1_cluster, resource2_cluster, resource3_cluster;
     wire [31:0] resource0_size, resource1_size, resource2_size, resource3_size;
-    wire [3:0] source_debug_scanner_state, source_debug_resource_valid;
+    wire [3:0] source_debug_scanner_state;
+    wire [15:0] source_debug_resource_valid;
     wire [31:0] source_debug_sector_lba;
     wire [8:0] source_debug_sector_byte_count;
     wire source_debug_sector_active;
@@ -124,12 +133,10 @@ module sd_card_bmp_fat32 #(
     reg scan_start_pulse, load_start_pulse, load_abort_pulse;
     reg scan_kicked, scan_completed, preload_halted;
     reg [15:0] image_resource_valid;
-    // Scanner owns the tables and holds them until the next scan/reset.
-    // scan_completed gates all consumers; do not duplicate 1024 table bits here.
-    wire [511:0] image_clusters = {resource_clusters[511:128],
-        resource3_cluster,resource2_cluster,resource1_cluster,resource0_cluster};
-    wire [511:0] image_sizes = {resource_sizes[511:128],
-        resource3_size,resource2_size,resource1_size,resource0_size};
+    // 扫描结束后资源表保持不变，直到下一次重新扫描；直接使用唯一参数表。
+    // 无需再复制 1024 位，也不再让前四张走独立的参数路径。
+    wire [511:0] image_clusters = resource_clusters;
+    wire [511:0] image_sizes = resource_sizes;
     reg saved_pic10_size_bit5;
     // 前四槽别名用于原有调试接口。
     wire [31:0] img_cluster1 = image_clusters[63:32];
@@ -166,6 +173,22 @@ module sd_card_bmp_fat32 #(
     end
     reg [3:0] lookup_slot, lookup_image;
     reg [31:0] load_cluster_lut, load_size_lut;
+    // 16 选 1 拆成两级 4 选 1，并将有效槽判断与参数锁存分拍。
+    reg [127:0] lookup_cluster_groups, lookup_size_groups;
+    genvar lookup_group;
+    generate for(lookup_group=0; lookup_group<4; lookup_group=lookup_group+1) begin: metadata_lookup
+        always @(posedge clk or posedge rst) begin
+            if(rst) begin
+                lookup_cluster_groups[lookup_group*32 +:32] <= 0;
+                lookup_size_groups[lookup_group*32 +:32] <= 0;
+            end else begin
+                lookup_cluster_groups[lookup_group*32 +:32] <=
+                    image_clusters[lookup_group*128 + lookup_slot[1:0]*32 +:32];
+                lookup_size_groups[lookup_group*32 +:32] <=
+                    image_sizes[lookup_group*128 + lookup_slot[1:0]*32 +:32];
+            end
+        end
+    end endgenerate
     reg [2:0] wrfin_tgl_sync;
     reg [7:0] last_error;
     wire key_next_press, key_next_stable, key_auto_press, key_auto_stable, key_audio_mode_press;
@@ -310,6 +333,7 @@ module sd_card_bmp_fat32 #(
     assign debug_sector_active=source_debug_sector_active;
     assign debug_sector_done_count=source_debug_sector_done_count;
     assign debug_resource_valid=source_debug_resource_valid;
+    assign debug_image_count=img_found_count;
     assign debug_sd_state=source_debug_sd_state;
     assign debug_sd_cmd_error=source_debug_sd_cmd_error;
     assign debug_sd_cmd_error_latched=source_debug_sd_cmd_error_latched;
@@ -404,6 +428,8 @@ module sd_card_bmp_fat32 #(
     sd_fat32_image_source #(.PCM_ENABLE(PCM_ENABLE)) u_image_source (
         .clk(clk), .rst(rst),
         .pixel_clk(pixel_clk), .pcm_ready(pcm_ready), .pcm_sample(pcm_sample),
+        .pcm_image_id_pix(pcm_image_id_pix), .pcm_commit_toggle_pix(pcm_commit_toggle_pix),
+        .pcm_commit_ack(pcm_commit_ack),
         .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
         .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
         .pcm_play_enable(scan_completed && load_prepare == 0 && !image_read_needed &&
@@ -436,10 +462,14 @@ module sd_card_bmp_fat32 #(
         .debug_sector_done_count(source_debug_sector_done_count),
         .debug_resource_valid(source_debug_resource_valid),
         .debug_pic10_size_bit5(debug_pic10_size_bit5),
+        .debug_root_crc(debug_root_crc),
+        .debug_root_bytes(debug_root_bytes),
         .debug_sd_state(source_debug_sd_state),
         .debug_sd_cmd_error(source_debug_sd_cmd_error),
         .debug_sd_cmd_error_latched(source_debug_sd_cmd_error_latched),
-        .debug_load_pipeline(source_debug_load_pipeline)
+        .debug_load_pipeline(source_debug_load_pipeline),
+        .debug_accepted_cluster(debug_source_cluster),
+        .debug_pcm_status(debug_pcm_status)
     );
 
 
@@ -487,9 +517,7 @@ module sd_card_bmp_fat32 #(
                     if(load_prepare == 1) begin
                         if(image_resource_valid[lookup_slot] && lookup_image == load_idx) begin
                             load_file_number <= {1'b0,lookup_slot}+5'd1;
-                            load_cluster_lut <= image_clusters[lookup_slot*32 +:32];
-                            load_size_lut <= image_sizes[lookup_slot*32 +:32];
-                            load_prepare <= 2;
+                            load_prepare <= 3;
                         end else if(lookup_slot == 15) begin
                             load_busy<=0; load_prepare<=0;
                             preload_halted<=1; last_error<=8'h22;
@@ -497,6 +525,10 @@ module sd_card_bmp_fat32 #(
                             lookup_slot <= lookup_slot + 1'b1;
                             if(image_resource_valid[lookup_slot]) lookup_image<=lookup_image+1'b1;
                         end
+                    end else if(load_prepare == 3) begin
+                        load_cluster_lut <= lookup_cluster_groups[lookup_slot[3:2]*32 +:32];
+                        load_size_lut <= lookup_size_groups[lookup_slot[3:2]*32 +:32];
+                        load_prepare <= 2;
                     end else if(load_prepare == 2) begin
                         if(source_ready) begin
                             load_start_pulse<=1; load_prepare<=0;

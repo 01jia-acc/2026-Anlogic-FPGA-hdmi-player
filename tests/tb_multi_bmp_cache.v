@@ -151,14 +151,19 @@ module tb_multi_bmp_cache #(
         end
     endtask
     initial begin
-        for(i=0;i<16;i=i+1) begin clusters[i*32 +:32]=(i+1)*10; sizes[i*32 +:32]=921654; end
+        // First ten cluster addresses reproduce the captured user's TF directory,
+        // including PIC5=0x032a (the failing hardware case was 0x030a).
+        for(i=0;i<16;i=i+1) begin
+            clusters[i*32 +:32]=(i<4 ? 3+i*113 : 810+(i-4)*113);
+            sizes[i*32 +:32]=921654;
+        end
         force dut.sd_init_done=1'b1; force dut.source_ready=1'b1;
         force dut.source_load_busy=1'b0; force dut.scan_busy=1'b0;
         force dut.scan_done=scan_done; force dut.scan_error=8'd0;
         force dut.resource_valid=resources; force dut.resource_clusters=clusters;
         force dut.resource_sizes=sizes;
-        force dut.resource0_cluster=32'd10; force dut.resource1_cluster=32'd20;
-        force dut.resource2_cluster=32'd30; force dut.resource3_cluster=32'd40;
+        force dut.resource0_cluster=32'd3; force dut.resource1_cluster=32'd116;
+        force dut.resource2_cluster=32'd229; force dut.resource3_cluster=32'd342;
         force dut.resource0_size=32'd921654; force dut.resource1_size=32'd921654;
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=source_error;
@@ -227,7 +232,7 @@ module tb_multi_bmp_cache #(
         // Sparse high-number files compact to four logical images.
         resources=16'h8211; boot;
         if(dut.img_found_count!=4 || dut.bank_image_ids!=16'h3210 ||
-           dut.image_clusters[9*32 +:32]!=100 || dut.image_clusters[15*32 +:32]!=160)
+           dut.image_clusters[9*32 +:32]!=1375 || dut.image_clusters[15*32 +:32]!=2053)
             $fatal(1,"Sparse upper slots missing");
         for(i=1;i<=4;i=i+1) begin next_key; navigate(i%4); end
         if(loads!=4) $fatal(1,"Sparse cached navigation reloaded");

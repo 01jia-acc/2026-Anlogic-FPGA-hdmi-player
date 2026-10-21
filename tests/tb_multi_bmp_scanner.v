@@ -2,8 +2,10 @@
 module tb_multi_bmp_scanner;
     reg clk=0, rst_n=0, start=0;
     always #5 clk=~clk;
-    wire req, busy, done, audio_valid;
-    wire [31:0] lba, audio_cluster, audio_size, partition;
+    wire req, busy, done;
+    wire [15:0] audio_valid;
+    wire [511:0] audio_cluster, audio_size;
+    wire [31:0] lba, partition;
     wire [7:0] error;
     wire pic10_size_bit5;
     wire [15:0] valid;
@@ -54,6 +56,15 @@ module tb_multi_bmp_scanner;
             pic_name={"PIC",first,second,"   BMP"};
         end
     endfunction
+    function [87:0] audio_name;
+        input integer number;
+        reg [7:0] first, second;
+        begin
+            first=number<10 ? "0"+number : "1";
+            second=number<10 ? " " : "0"+number-10;
+            audio_name={"AUDIO",first,second," PCM"};
+        end
+    endfunction
     task prepare;
         input integer kind;
         begin
@@ -83,11 +94,14 @@ module tb_multi_bmp_scanner;
             entry((base+127)*512+10*32,pic_name(11),200,100); disk[(base+127)*512+10*32+11]=8'h10;
             entry((base+127)*512+11*32,pic_name(12),200,100); disk[(base+127)*512+11*32+11]=8'h08;
             entry((base+127)*512+12*32,pic_name(17),200,100);
-            entry((base+7)*512+8*32,"AUDIO   PCM",123,96000);
+            entry((base+127)*512+13*32,"PIC01   BMP",200,100);
+            entry((base+127)*512+14*32,"PIC0    BMP",200,100);
+            entry((base+127)*512+15*32,"PIC2X   BMP",200,100);
+            entry((base+7)*512+8*32,"AUDIO16 PCM",123,96000);
             entry((base+7)*512+9*32,pic_name(1),200,100); // duplicate: keep first
             if(kind!=1 && kind!=5) begin
                 disk[(base+7)*512+10*32]=0;
-                entry((base+7)*512+11*32,"AUDIO   PCM",201,2);
+                entry((base+7)*512+11*32,"AUDIO1  PCM",201,2);
             end
             if(kind==2) put32((base+1)*512+127*4,127);
             if(kind==3) put32((base+1)*512+127*4,300);
@@ -135,7 +149,8 @@ module tb_multi_bmp_scanner;
             wait(done); #1;
             if(error!=want_error) $fatal(1,"Root scan error case=%0d actual=%h",kind,error);
             if(kind<=1) begin
-                if(valid!==16'hffff || !audio_valid || audio_cluster!=123 || audio_size!=96000 || partition!=base)
+                if(valid!==16'hffff || audio_valid!==16'h8000 ||
+                   audio_cluster[480 +:32]!=123 || audio_size[480 +:32]!=96000 || partition!=base)
                     $fatal(1,"16-image/root-chain/audio scan failed");
                 for(i=0;i<16;i=i+1)
                     if(clusters[i*32 +:32]!=41+i || sizes[i*32 +:32]!=921655+i)
@@ -160,10 +175,45 @@ module tb_multi_bmp_scanner;
             $display("PASS root case %0d error=%h root sectors=%0d",kind,error,root_requests);
         end
     endtask
+    // Eight PIC/AUDIO pairs fill a directory sector. PIC9 must still be found
+    // in the next sector, whether it shares a cluster or needs a FAT traversal.
+    task run_paired_case;
+        input integer spc;
+        integer pic_number, dir_lba, dir_offset;
+        begin
+            @(negedge clk); rst_n=0; start=0; base=0;
+            for(i=0;i<133632;i=i+1) disk[i]=0;
+            disk[0]=8'heb; disk[12]=2; disk[13]=spc;
+            disk[14]=1; disk[16]=1;
+            put32(32,256); put32(36,1); put32(44,2);
+            disk[510]=8'h55; disk[511]=8'haa;
+            put32(512+2*4,spc==1 ? 5 : 32'h0fffffff);
+            put32(512+5*4,32'h0fffffff);
+            for(pic_number=1;pic_number<=16;pic_number=pic_number+1) begin
+                dir_lba=pic_number<=8 ? 2 : spc==1 ? 5 : 3;
+                dir_offset=dir_lba*512+((pic_number-1)%8)*64;
+                entry(dir_offset,pic_name(pic_number),40+pic_number,921654+pic_number);
+                entry(dir_offset+32,audio_name(pic_number),80+pic_number,96000+pic_number*2);
+            end
+            repeat(4) @(negedge clk);
+            rst_n=1; start=1;
+            @(negedge clk); start=0;
+            wait(done); #1;
+            if(error!=0 || valid!==16'hffff || audio_valid!==16'hffff)
+                $fatal(1,"Paired directory stopped early spc=%0d pic=%h audio=%h error=%h",spc,valid,audio_valid,error);
+            for(i=0;i<16;i=i+1) begin
+                if(clusters[i*32 +:32]!=41+i || sizes[i*32 +:32]!=921655+i ||
+                   audio_cluster[i*32 +:32]!=81+i || audio_size[i*32 +:32]!=96002+i*2)
+                    $fatal(1,"Paired directory metadata mismatch spc=%0d PIC%0d",spc,i+1);
+            end
+            $display("PASS: 16 interleaved PIC/PCM pairs across directory sectors, sectors/cluster=%0d",spc);
+        end
+    endtask
     initial begin
         run_case(0,0); run_case(1,0); run_case(2,8'h23);
         run_case(3,8'h23); run_case(4,8'h22); run_case(5,8'h23);
         run_case(6,0); run_case(7,0);
+        run_paired_case(1); run_paired_case(2); run_paired_case(8); run_paired_case(64);
         $display("PASS: PIC1..16, fragmented root, MBR, EOC, ignored entries, first duplicate, simultaneous FAT done, invalid/cyclic root");
         $finish;
     end

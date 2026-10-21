@@ -10,6 +10,9 @@ module pcm_stream_buffer #(
     parameter integer PREFILL_SAMPLES = 256
 ) (
     input wire wr_clk, rd_clk, rst,
+    // 写域保持清空请求，等 clear_ack 高再撤销，等其低后才开始新文件。
+    input wire stream_clear,
+    output wire clear_ack,
     input wire stream_start, byte_valid,
     input wire [7:0] byte_data,
     input wire stream_done,
@@ -25,7 +28,7 @@ module pcm_stream_buffer #(
     output reg [31:0] sample_counter
 );
     localparam integer DEPTH = 1 << ADDR_WIDTH;
-    reg [15:0] buffer [0:DEPTH-1];
+    reg [15:0] buffer [0:DEPTH-1]; /* fehdl force_ram=1, ram_style="bram" */
     reg [ADDR_WIDTH:0] wr_ptr, rd_ptr, wr_gray, rd_gray;
     (* ASYNC_REG = "TRUE" *) reg [ADDR_WIDTH:0] rd_sync1, rd_sync2;
     (* ASYNC_REG = "TRUE" *) reg [ADDR_WIDTH:0] wr_sync1, wr_sync2;
@@ -37,6 +40,14 @@ module pcm_stream_buffer #(
     reg primed;
     reg out_valid;
     reg [15:0] out_sample;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] clear_rd_sync, clear_wr_sync;
+    assign clear_ack = clear_wr_sync[1];
+    always @(posedge rd_clk or posedge rst)
+        if(rst) clear_rd_sync<=0;
+        else clear_rd_sync<={clear_rd_sync[0],stream_clear};
+    always @(posedge wr_clk or posedge rst)
+        if(rst) clear_wr_sync<=0;
+        else clear_wr_sync<={clear_wr_sync[0],clear_rd_sync[1]};
     function [ADDR_WIDTH:0] from_gray;
         input [ADDR_WIDTH:0] g;
         integer i;
@@ -58,8 +69,23 @@ module pcm_stream_buffer #(
     assign stream_end = end_sync[3] && used_rd == 0 && !out_valid;
     assign stream_active = start_sync[2] && !stream_end;
 
+    // RAM端口独立于复位/清空控制。清空只复位指针和有效位，不擦RAM，
+    // 否则TD会把4096个样本展开成大量LUT而无法装入器件。
+    wire ram_write = !rst && !stream_clear && byte_valid && started_wr &&
+        !ended_wr && low_pending && used_wr < DEPTH;
+    wire ram_read = !rst && !clear_rd_sync[1] && primed && used_rd!=0 &&
+        (!out_valid || sample_ready);
+    always @(posedge wr_clk)
+        if(ram_write) buffer[wr_ptr[ADDR_WIDTH-1:0]]<={byte_data,low_byte};
+    always @(posedge rd_clk)
+        if(ram_read) out_sample<=buffer[rd_ptr[ADDR_WIDTH-1:0]];
+
     always @(posedge wr_clk or posedge rst) begin
         if (rst) begin
+            wr_ptr <= 0; wr_gray <= 0; rd_sync1 <= 0; rd_sync2 <= 0;
+            started_wr <= 0; ended_wr <= 0; prefilled_wr <= 0; low_pending <= 0;
+            low_byte <= 0; overflow <= 0;
+        end else if(stream_clear) begin
             wr_ptr <= 0; wr_gray <= 0; rd_sync1 <= 0; rd_sync2 <= 0;
             started_wr <= 0; ended_wr <= 0; prefilled_wr <= 0; low_pending <= 0;
             low_byte <= 0; overflow <= 0;
@@ -75,7 +101,6 @@ module pcm_stream_buffer #(
                 end else begin
                     low_pending <= 1'b0;
                     if (used_wr < DEPTH) begin
-                        buffer[wr_ptr[ADDR_WIDTH-1:0]] <= {byte_data, low_byte};
                         wr_ptr <= wr_next;
                         wr_gray <= wr_next ^ (wr_next >> 1);
                     end else overflow <= 1'b1;
@@ -90,7 +115,11 @@ module pcm_stream_buffer #(
         if (rst) begin
             rd_ptr <= 0; rd_gray <= 0; wr_sync1 <= 0; wr_sync2 <= 0;
             start_sync <= 0; end_sync <= 0; prefill_sync <= 0; primed <= 0;
-            out_valid <= 0; out_sample <= 0; underflow <= 0; sample_counter <= 0;
+            out_valid <= 0; underflow <= 0; sample_counter <= 0;
+        end else if(clear_rd_sync[1]) begin
+            rd_ptr <= 0; rd_gray <= 0; wr_sync1 <= 0; wr_sync2 <= 0;
+            start_sync <= 0; end_sync <= 0; prefill_sync <= 0; primed <= 0;
+            out_valid <= 0; underflow <= 0; sample_counter <= 0;
         end else begin
             wr_sync1 <= wr_gray; wr_sync2 <= wr_sync1;
             start_sync <= {start_sync[1:0], started_wr};
@@ -105,7 +134,6 @@ module pcm_stream_buffer #(
             if (primed && sample_ready && !out_valid && stream_active)
                 underflow <= 1'b1;
             if (primed && used_rd != 0 && (!out_valid || sample_ready)) begin
-                out_sample <= buffer[rd_ptr[ADDR_WIDTH-1:0]];
                 out_valid <= 1'b1;
                 rd_ptr <= rd_next;
                 rd_gray <= rd_next ^ (rd_next >> 1);

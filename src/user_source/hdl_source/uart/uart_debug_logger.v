@@ -25,12 +25,17 @@ module uart_debug_logger #(
     input  wire [8:0] sector_byte_count,
     input  wire [4:0] sd_state,
     input  wire       sd_cmd_error_latched,
-    input  wire [3:0] resource_valid,
+    input  wire [15:0] resource_valid,
+    input  wire [4:0] image_count,
+    input wire [31:0] root_crc,
+    input wire [15:0] root_bytes,
     input  wire [15:0] sector_done_count,
     input wire [4:0] load_image_number,
     input wire [31:0] load_cluster, load_size,
+    input wire [31:0] accepted_cluster,
     input wire [63:0] load_pipeline,
-    input wire [63:0] playlist_snapshot, // Already transferred into clk domain.
+    input wire [159:0] pcm_status,
+    input wire [63:0] playlist_snapshot, // Coherent SD-to-UART mailbox snapshot.
     output wire       tx
 );
     localparam integer LOG_INTERVAL_CYCLES =
@@ -39,11 +44,12 @@ module uart_debug_logger #(
     // P=1 I=1 T=1 B=1 D=0 E=00 V=0 S=2 A=1 L=00000000 C=000 Q=06 X=0 F=0 N=0000 R=00\r\n
     // J为加载的播放序号（十六进制、从1开始），K为首簇，Z为文件字节数。
     // H is the live pipeline snapshot, frozen by the scheduler on load abort.
-    // M=raw 16-file mask, U=saved mask, G=count, O=current playlist number,
-    // Y[4:0]=last physical PIC number; Y[7:5]=PIC10 size bit5 at
-    // saved table / scanner table / raw directory-byte capture respectively.
-    // W={halted,busy,prepare[1:0],complete[3:0]}.
-    localparam integer MESSAGE_LENGTH = 160;
+    // M: all 16 PIC slots; U: scheduler picture count, hexadecimal.
+    // Keep legacy F (the low four slots) for existing log readers.
+    // O: PCM mask/flags/image/slot/error/cluster/size/consumed samples/current sample.
+    // PL: coherent playlist mailbox, retaining mask/count/current/physical-file/cache flags.
+    // G: first cluster actually accepted by the image file source (compare K).
+    localparam integer MESSAGE_LENGTH = 230;
 
     reg [31:0] interval_count;
     reg        boot_pending;
@@ -65,15 +71,22 @@ module uart_debug_logger #(
     reg [8:0]  snap_sector_byte_count;
     reg [4:0]  snap_sd_state;
     reg        snap_sd_cmd_error_latched;
-    reg [3:0]  snap_resource_valid;
+    reg [15:0] snap_resource_valid;
+    reg [4:0] snap_image_count;
+    reg [31:0] snap_root_crc;
+    reg [15:0] snap_root_bytes;
     reg [15:0] snap_sector_done_count;
     reg [4:0] snap_load_image_number;
     reg [31:0] snap_load_cluster, snap_load_size;
+    reg [31:0] snap_accepted_cluster;
     reg [63:0] snap_load_pipeline;
+    reg [159:0] snap_pcm_status;
     reg [63:0] snap_playlist;
 
     wire       tx_busy;
-    wire [7:0] tx_byte;
+    reg [7:0] tx_byte;
+    reg [8:0] tx_symbol;
+    reg [2:0] byte_settle;
 
     function [7:0] hex_ascii;
         input [3:0] value;
@@ -85,178 +98,258 @@ module uart_debug_logger #(
         end
     endfunction
 
-    function [7:0] message_byte;
+    // Register symbol selection before hexadecimal ASCII conversion.
+    function [8:0] hex_symbol;
+        input [3:0] value;
+        begin hex_symbol = {1'b1,4'd0,value}; end
+    endfunction
+
+    function [8:0] message_byte;
         input [7:0] index;
         begin
             case (index)
                 7'd0:  message_byte = "P";
                 7'd1:  message_byte = "=";
-                7'd2:  message_byte = hex_ascii({3'd0, snap_pll_ready});
+                7'd2:  message_byte = hex_symbol({3'd0, snap_pll_ready});
                 7'd3:  message_byte = " ";
                 7'd4:  message_byte = "I";
                 7'd5:  message_byte = "=";
-                7'd6:  message_byte = hex_ascii({3'd0, snap_sd_init_done});
+                7'd6:  message_byte = hex_symbol({3'd0, snap_sd_init_done});
                 7'd7:  message_byte = " ";
                 7'd8:  message_byte = "T";
                 7'd9:  message_byte = "=";
-                7'd10: message_byte = hex_ascii(snap_state_code);
+                7'd10: message_byte = hex_symbol(snap_state_code);
                 7'd11: message_byte = " ";
                 7'd12: message_byte = "B";
                 7'd13: message_byte = "=";
-                7'd14: message_byte = hex_ascii({3'd0, snap_scan_busy});
+                7'd14: message_byte = hex_symbol({3'd0, snap_scan_busy});
                 7'd15: message_byte = " ";
                 7'd16: message_byte = "D";
                 7'd17: message_byte = "=";
-                7'd18: message_byte = hex_ascii({3'd0, snap_scan_done});
+                7'd18: message_byte = hex_symbol({3'd0, snap_scan_done});
                 7'd19: message_byte = " ";
                 7'd20: message_byte = "E";
                 7'd21: message_byte = "=";
-                7'd22: message_byte = hex_ascii(snap_scan_error[7:4]);
-                7'd23: message_byte = hex_ascii(snap_scan_error[3:0]);
+                7'd22: message_byte = hex_symbol(snap_scan_error[7:4]);
+                7'd23: message_byte = hex_symbol(snap_scan_error[3:0]);
                 7'd24: message_byte = " ";
                 7'd25: message_byte = "V";
                 7'd26: message_byte = "=";
-                7'd27: message_byte = hex_ascii({3'd0, snap_display_valid});
+                7'd27: message_byte = hex_symbol({3'd0, snap_display_valid});
                 7'd28: message_byte = " ";
                 7'd29: message_byte = "S";
                 7'd30: message_byte = "=";
-                7'd31: message_byte = hex_ascii(snap_scanner_state);
+                7'd31: message_byte = hex_symbol(snap_scanner_state);
                 7'd32: message_byte = " ";
                 7'd33: message_byte = "A";
                 7'd34: message_byte = "=";
-                7'd35: message_byte = hex_ascii({3'd0, snap_sector_active});
+                7'd35: message_byte = hex_symbol({3'd0, snap_sector_active});
                 7'd36: message_byte = " ";
                 7'd37: message_byte = "L";
                 7'd38: message_byte = "=";
-                7'd39: message_byte = hex_ascii(snap_sector_lba[31:28]);
-                7'd40: message_byte = hex_ascii(snap_sector_lba[27:24]);
-                7'd41: message_byte = hex_ascii(snap_sector_lba[23:20]);
-                7'd42: message_byte = hex_ascii(snap_sector_lba[19:16]);
-                7'd43: message_byte = hex_ascii(snap_sector_lba[15:12]);
-                7'd44: message_byte = hex_ascii(snap_sector_lba[11:8]);
-                7'd45: message_byte = hex_ascii(snap_sector_lba[7:4]);
-                7'd46: message_byte = hex_ascii(snap_sector_lba[3:0]);
+                7'd39: message_byte = hex_symbol(snap_sector_lba[31:28]);
+                7'd40: message_byte = hex_symbol(snap_sector_lba[27:24]);
+                7'd41: message_byte = hex_symbol(snap_sector_lba[23:20]);
+                7'd42: message_byte = hex_symbol(snap_sector_lba[19:16]);
+                7'd43: message_byte = hex_symbol(snap_sector_lba[15:12]);
+                7'd44: message_byte = hex_symbol(snap_sector_lba[11:8]);
+                7'd45: message_byte = hex_symbol(snap_sector_lba[7:4]);
+                7'd46: message_byte = hex_symbol(snap_sector_lba[3:0]);
                 7'd47: message_byte = " ";
                 7'd48: message_byte = "C";
                 7'd49: message_byte = "=";
-                7'd50: message_byte = hex_ascii({3'd0, snap_sector_byte_count[8]});
-                7'd51: message_byte = hex_ascii(snap_sector_byte_count[7:4]);
-                7'd52: message_byte = hex_ascii(snap_sector_byte_count[3:0]);
+                7'd50: message_byte = hex_symbol({3'd0, snap_sector_byte_count[8]});
+                7'd51: message_byte = hex_symbol(snap_sector_byte_count[7:4]);
+                7'd52: message_byte = hex_symbol(snap_sector_byte_count[3:0]);
                 7'd53: message_byte = " ";
                 7'd54: message_byte = "Q";
                 7'd55: message_byte = "=";
-                7'd56: message_byte = hex_ascii({3'd0, snap_sd_state[4]});
-                7'd57: message_byte = hex_ascii(snap_sd_state[3:0]);
+                7'd56: message_byte = hex_symbol({3'd0, snap_sd_state[4]});
+                7'd57: message_byte = hex_symbol(snap_sd_state[3:0]);
                 7'd58: message_byte = " ";
                 7'd59: message_byte = "X";
                 7'd60: message_byte = "=";
-                7'd61: message_byte = hex_ascii({3'd0, snap_sd_cmd_error_latched});
+                7'd61: message_byte = hex_symbol({3'd0, snap_sd_cmd_error_latched});
                 7'd62: message_byte = " ";
                 7'd63: message_byte = "F";
                 7'd64: message_byte = "=";
-                7'd65: message_byte = hex_ascii(snap_resource_valid);
+                7'd65: message_byte = hex_symbol(snap_resource_valid[3:0]);
                 7'd66: message_byte = " ";
                 7'd67: message_byte = "N";
                 7'd68: message_byte = "=";
-                7'd69: message_byte = hex_ascii(snap_sector_done_count[15:12]);
-                7'd70: message_byte = hex_ascii(snap_sector_done_count[11:8]);
-                7'd71: message_byte = hex_ascii(snap_sector_done_count[7:4]);
-                7'd72: message_byte = hex_ascii(snap_sector_done_count[3:0]);
+                7'd69: message_byte = hex_symbol(snap_sector_done_count[15:12]);
+                7'd70: message_byte = hex_symbol(snap_sector_done_count[11:8]);
+                7'd71: message_byte = hex_symbol(snap_sector_done_count[7:4]);
+                7'd72: message_byte = hex_symbol(snap_sector_done_count[3:0]);
                 7'd73: message_byte = " ";
                 7'd74: message_byte = "R";
                 7'd75: message_byte = "=";
-                7'd76: message_byte = hex_ascii(snap_rx_data[7:4]);
-                7'd77: message_byte = hex_ascii(snap_rx_data[3:0]);
+                7'd76: message_byte = hex_symbol(snap_rx_data[7:4]);
+                7'd77: message_byte = hex_symbol(snap_rx_data[3:0]);
                 7'd78: message_byte = " ";
                 7'd79: message_byte = "J";
                 7'd80: message_byte = "=";
-                7'd81: message_byte = hex_ascii({3'd0,snap_load_image_number[4]});
-                7'd82: message_byte = hex_ascii(snap_load_image_number[3:0]);
+                7'd81: message_byte = hex_symbol({3'd0,snap_load_image_number[4]});
+                7'd82: message_byte = hex_symbol(snap_load_image_number[3:0]);
                 7'd83: message_byte = " ";
                 7'd84: message_byte = "K";
                 7'd85: message_byte = "=";
-                7'd86: message_byte = hex_ascii(snap_load_cluster[31:28]);
-                7'd87: message_byte = hex_ascii(snap_load_cluster[27:24]);
-                7'd88: message_byte = hex_ascii(snap_load_cluster[23:20]);
-                7'd89: message_byte = hex_ascii(snap_load_cluster[19:16]);
-                7'd90: message_byte = hex_ascii(snap_load_cluster[15:12]);
-                7'd91: message_byte = hex_ascii(snap_load_cluster[11:8]);
-                7'd92: message_byte = hex_ascii(snap_load_cluster[7:4]);
-                7'd93: message_byte = hex_ascii(snap_load_cluster[3:0]);
+                7'd86: message_byte = hex_symbol(snap_load_cluster[31:28]);
+                7'd87: message_byte = hex_symbol(snap_load_cluster[27:24]);
+                7'd88: message_byte = hex_symbol(snap_load_cluster[23:20]);
+                7'd89: message_byte = hex_symbol(snap_load_cluster[19:16]);
+                7'd90: message_byte = hex_symbol(snap_load_cluster[15:12]);
+                7'd91: message_byte = hex_symbol(snap_load_cluster[11:8]);
+                7'd92: message_byte = hex_symbol(snap_load_cluster[7:4]);
+                7'd93: message_byte = hex_symbol(snap_load_cluster[3:0]);
                 7'd94: message_byte = " ";
                 7'd95: message_byte = "Z";
                 7'd96: message_byte = "=";
-                7'd97: message_byte = hex_ascii(snap_load_size[31:28]);
-                7'd98: message_byte = hex_ascii(snap_load_size[27:24]);
-                7'd99: message_byte = hex_ascii(snap_load_size[23:20]);
-                7'd100: message_byte = hex_ascii(snap_load_size[19:16]);
-                7'd101: message_byte = hex_ascii(snap_load_size[15:12]);
-                7'd102: message_byte = hex_ascii(snap_load_size[11:8]);
-                7'd103: message_byte = hex_ascii(snap_load_size[7:4]);
-                7'd104: message_byte = hex_ascii(snap_load_size[3:0]);
+                7'd97: message_byte = hex_symbol(snap_load_size[31:28]);
+                7'd98: message_byte = hex_symbol(snap_load_size[27:24]);
+                7'd99: message_byte = hex_symbol(snap_load_size[23:20]);
+                7'd100: message_byte = hex_symbol(snap_load_size[19:16]);
+                7'd101: message_byte = hex_symbol(snap_load_size[15:12]);
+                7'd102: message_byte = hex_symbol(snap_load_size[11:8]);
+                7'd103: message_byte = hex_symbol(snap_load_size[7:4]);
+                7'd104: message_byte = hex_symbol(snap_load_size[3:0]);
                 7'd105: message_byte = " ";
                 7'd106: message_byte = "H";
                 7'd107: message_byte = "=";
                 8'd124: message_byte = " ";
                 8'd125: message_byte = "M";
                 8'd126: message_byte = "=";
+                8'd127: message_byte = hex_symbol(snap_resource_valid[15:12]);
+                8'd128: message_byte = hex_symbol(snap_resource_valid[11:8]);
+                8'd129: message_byte = hex_symbol(snap_resource_valid[7:4]);
+                8'd130: message_byte = hex_symbol(snap_resource_valid[3:0]);
                 8'd131: message_byte = " ";
                 8'd132: message_byte = "U";
                 8'd133: message_byte = "=";
-                8'd138: message_byte = " ";
-                8'd139: message_byte = "G";
-                8'd140: message_byte = "=";
-                8'd143: message_byte = " ";
-                8'd144: message_byte = "O";
-                8'd145: message_byte = "=";
-                8'd148: message_byte = " ";
-                8'd149: message_byte = "Y";
-                8'd150: message_byte = "=";
-                8'd153: message_byte = " ";
-                8'd154: message_byte = "W";
-                8'd155: message_byte = "=";
-                8'd158: message_byte = 8'h0d;
-                8'd159: message_byte = 8'h0a;
-                // Constant slices avoid index subtractors and variable barrel
-                // shifters for every diagnostic field on this small FPGA.
-                8'd108: message_byte = hex_ascii(snap_load_pipeline[60 +:4]);
-                8'd109: message_byte = hex_ascii(snap_load_pipeline[56 +:4]);
-                8'd110: message_byte = hex_ascii(snap_load_pipeline[52 +:4]);
-                8'd111: message_byte = hex_ascii(snap_load_pipeline[48 +:4]);
-                8'd112: message_byte = hex_ascii(snap_load_pipeline[44 +:4]);
-                8'd113: message_byte = hex_ascii(snap_load_pipeline[40 +:4]);
-                8'd114: message_byte = hex_ascii(snap_load_pipeline[36 +:4]);
-                8'd115: message_byte = hex_ascii(snap_load_pipeline[32 +:4]);
-                8'd116: message_byte = hex_ascii(snap_load_pipeline[28 +:4]);
-                8'd117: message_byte = hex_ascii(snap_load_pipeline[24 +:4]);
-                8'd118: message_byte = hex_ascii(snap_load_pipeline[20 +:4]);
-                8'd119: message_byte = hex_ascii(snap_load_pipeline[16 +:4]);
-                8'd120: message_byte = hex_ascii(snap_load_pipeline[12 +:4]);
-                8'd121: message_byte = hex_ascii(snap_load_pipeline[8 +:4]);
-                8'd122: message_byte = hex_ascii(snap_load_pipeline[4 +:4]);
-                8'd123: message_byte = hex_ascii(snap_load_pipeline[0 +:4]);
-                8'd127: message_byte = hex_ascii(snap_playlist[60 +:4]);
-                8'd128: message_byte = hex_ascii(snap_playlist[56 +:4]);
-                8'd129: message_byte = hex_ascii(snap_playlist[52 +:4]);
-                8'd130: message_byte = hex_ascii(snap_playlist[48 +:4]);
-                8'd134: message_byte = hex_ascii(snap_playlist[44 +:4]);
-                8'd135: message_byte = hex_ascii(snap_playlist[40 +:4]);
-                8'd136: message_byte = hex_ascii(snap_playlist[36 +:4]);
-                8'd137: message_byte = hex_ascii(snap_playlist[32 +:4]);
-                8'd141: message_byte = hex_ascii(snap_playlist[28 +:4]);
-                8'd142: message_byte = hex_ascii(snap_playlist[24 +:4]);
-                8'd146: message_byte = hex_ascii(snap_playlist[20 +:4]);
-                8'd147: message_byte = hex_ascii(snap_playlist[16 +:4]);
-                8'd151: message_byte = hex_ascii(snap_playlist[12 +:4]);
-                8'd152: message_byte = hex_ascii(snap_playlist[8 +:4]);
-                8'd156: message_byte = hex_ascii(snap_playlist[4 +:4]);
-                8'd157: message_byte = hex_ascii(snap_playlist[0 +:4]);
+                8'd134: message_byte = hex_symbol({3'd0,snap_image_count[4]});
+                8'd135: message_byte = hex_symbol(snap_image_count[3:0]);
+                8'd136: message_byte = " ";
+                8'd137: message_byte = "W";
+                8'd138: message_byte = "=";
+                8'd147: message_byte = " ";
+                8'd148: message_byte = "Y";
+                8'd149: message_byte = "=";
+                8'd154: message_byte = " ";
+                8'd155: message_byte = "O";
+                8'd156: message_byte = "=";
+                8'd197: message_byte = " ";
+                8'd198: message_byte = "G";
+                8'd199: message_byte = "=";
+                8'd208: message_byte = " ";
+                8'd209: message_byte = "P";
+                8'd210: message_byte = "L";
+                8'd211: message_byte = "=";
+                8'd228: message_byte = 8'h0d;
+                8'd229: message_byte = 8'h0a;
+                8'd108: message_byte = hex_symbol(snap_load_pipeline[60 +:4]);
+                8'd109: message_byte = hex_symbol(snap_load_pipeline[56 +:4]);
+                8'd110: message_byte = hex_symbol(snap_load_pipeline[52 +:4]);
+                8'd111: message_byte = hex_symbol(snap_load_pipeline[48 +:4]);
+                8'd112: message_byte = hex_symbol(snap_load_pipeline[44 +:4]);
+                8'd113: message_byte = hex_symbol(snap_load_pipeline[40 +:4]);
+                8'd114: message_byte = hex_symbol(snap_load_pipeline[36 +:4]);
+                8'd115: message_byte = hex_symbol(snap_load_pipeline[32 +:4]);
+                8'd116: message_byte = hex_symbol(snap_load_pipeline[28 +:4]);
+                8'd117: message_byte = hex_symbol(snap_load_pipeline[24 +:4]);
+                8'd118: message_byte = hex_symbol(snap_load_pipeline[20 +:4]);
+                8'd119: message_byte = hex_symbol(snap_load_pipeline[16 +:4]);
+                8'd120: message_byte = hex_symbol(snap_load_pipeline[12 +:4]);
+                8'd121: message_byte = hex_symbol(snap_load_pipeline[8 +:4]);
+                8'd122: message_byte = hex_symbol(snap_load_pipeline[4 +:4]);
+                8'd123: message_byte = hex_symbol(snap_load_pipeline[0 +:4]);
+                8'd139: message_byte = hex_symbol(snap_root_crc[28 +:4]);
+                8'd140: message_byte = hex_symbol(snap_root_crc[24 +:4]);
+                8'd141: message_byte = hex_symbol(snap_root_crc[20 +:4]);
+                8'd142: message_byte = hex_symbol(snap_root_crc[16 +:4]);
+                8'd143: message_byte = hex_symbol(snap_root_crc[12 +:4]);
+                8'd144: message_byte = hex_symbol(snap_root_crc[8 +:4]);
+                8'd145: message_byte = hex_symbol(snap_root_crc[4 +:4]);
+                8'd146: message_byte = hex_symbol(snap_root_crc[0 +:4]);
+                8'd150: message_byte = hex_symbol(snap_root_bytes[12 +:4]);
+                8'd151: message_byte = hex_symbol(snap_root_bytes[8 +:4]);
+                8'd152: message_byte = hex_symbol(snap_root_bytes[4 +:4]);
+                8'd153: message_byte = hex_symbol(snap_root_bytes[0 +:4]);
+                8'd157: message_byte = hex_symbol(snap_pcm_status[156 +:4]);
+                8'd158: message_byte = hex_symbol(snap_pcm_status[152 +:4]);
+                8'd159: message_byte = hex_symbol(snap_pcm_status[148 +:4]);
+                8'd160: message_byte = hex_symbol(snap_pcm_status[144 +:4]);
+                8'd161: message_byte = hex_symbol(snap_pcm_status[140 +:4]);
+                8'd162: message_byte = hex_symbol(snap_pcm_status[136 +:4]);
+                8'd163: message_byte = hex_symbol(snap_pcm_status[132 +:4]);
+                8'd164: message_byte = hex_symbol(snap_pcm_status[128 +:4]);
+                8'd165: message_byte = hex_symbol(snap_pcm_status[124 +:4]);
+                8'd166: message_byte = hex_symbol(snap_pcm_status[120 +:4]);
+                8'd167: message_byte = hex_symbol(snap_pcm_status[116 +:4]);
+                8'd168: message_byte = hex_symbol(snap_pcm_status[112 +:4]);
+                8'd169: message_byte = hex_symbol(snap_pcm_status[108 +:4]);
+                8'd170: message_byte = hex_symbol(snap_pcm_status[104 +:4]);
+                8'd171: message_byte = hex_symbol(snap_pcm_status[100 +:4]);
+                8'd172: message_byte = hex_symbol(snap_pcm_status[96 +:4]);
+                8'd173: message_byte = hex_symbol(snap_pcm_status[92 +:4]);
+                8'd174: message_byte = hex_symbol(snap_pcm_status[88 +:4]);
+                8'd175: message_byte = hex_symbol(snap_pcm_status[84 +:4]);
+                8'd176: message_byte = hex_symbol(snap_pcm_status[80 +:4]);
+                8'd177: message_byte = hex_symbol(snap_pcm_status[76 +:4]);
+                8'd178: message_byte = hex_symbol(snap_pcm_status[72 +:4]);
+                8'd179: message_byte = hex_symbol(snap_pcm_status[68 +:4]);
+                8'd180: message_byte = hex_symbol(snap_pcm_status[64 +:4]);
+                8'd181: message_byte = hex_symbol(snap_pcm_status[60 +:4]);
+                8'd182: message_byte = hex_symbol(snap_pcm_status[56 +:4]);
+                8'd183: message_byte = hex_symbol(snap_pcm_status[52 +:4]);
+                8'd184: message_byte = hex_symbol(snap_pcm_status[48 +:4]);
+                8'd185: message_byte = hex_symbol(snap_pcm_status[44 +:4]);
+                8'd186: message_byte = hex_symbol(snap_pcm_status[40 +:4]);
+                8'd187: message_byte = hex_symbol(snap_pcm_status[36 +:4]);
+                8'd188: message_byte = hex_symbol(snap_pcm_status[32 +:4]);
+                8'd189: message_byte = hex_symbol(snap_pcm_status[28 +:4]);
+                8'd190: message_byte = hex_symbol(snap_pcm_status[24 +:4]);
+                8'd191: message_byte = hex_symbol(snap_pcm_status[20 +:4]);
+                8'd192: message_byte = hex_symbol(snap_pcm_status[16 +:4]);
+                8'd193: message_byte = hex_symbol(snap_pcm_status[12 +:4]);
+                8'd194: message_byte = hex_symbol(snap_pcm_status[8 +:4]);
+                8'd195: message_byte = hex_symbol(snap_pcm_status[4 +:4]);
+                8'd196: message_byte = hex_symbol(snap_pcm_status[0 +:4]);
+                8'd200: message_byte = hex_symbol(snap_accepted_cluster[28 +:4]);
+                8'd201: message_byte = hex_symbol(snap_accepted_cluster[24 +:4]);
+                8'd202: message_byte = hex_symbol(snap_accepted_cluster[20 +:4]);
+                8'd203: message_byte = hex_symbol(snap_accepted_cluster[16 +:4]);
+                8'd204: message_byte = hex_symbol(snap_accepted_cluster[12 +:4]);
+                8'd205: message_byte = hex_symbol(snap_accepted_cluster[8 +:4]);
+                8'd206: message_byte = hex_symbol(snap_accepted_cluster[4 +:4]);
+                8'd207: message_byte = hex_symbol(snap_accepted_cluster[0 +:4]);
+                8'd212: message_byte = hex_symbol(snap_playlist[60 +:4]);
+                8'd213: message_byte = hex_symbol(snap_playlist[56 +:4]);
+                8'd214: message_byte = hex_symbol(snap_playlist[52 +:4]);
+                8'd215: message_byte = hex_symbol(snap_playlist[48 +:4]);
+                8'd216: message_byte = hex_symbol(snap_playlist[44 +:4]);
+                8'd217: message_byte = hex_symbol(snap_playlist[40 +:4]);
+                8'd218: message_byte = hex_symbol(snap_playlist[36 +:4]);
+                8'd219: message_byte = hex_symbol(snap_playlist[32 +:4]);
+                8'd220: message_byte = hex_symbol(snap_playlist[28 +:4]);
+                8'd221: message_byte = hex_symbol(snap_playlist[24 +:4]);
+                8'd222: message_byte = hex_symbol(snap_playlist[20 +:4]);
+                8'd223: message_byte = hex_symbol(snap_playlist[16 +:4]);
+                8'd224: message_byte = hex_symbol(snap_playlist[12 +:4]);
+                8'd225: message_byte = hex_symbol(snap_playlist[8 +:4]);
+                8'd226: message_byte = hex_symbol(snap_playlist[4 +:4]);
+                8'd227: message_byte = hex_symbol(snap_playlist[0 +:4]);
                 default: message_byte = " ";
             endcase
         end
     endfunction
 
-    assign tx_byte = message_byte(message_index);
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin tx_symbol<=0; tx_byte<=0; end
+        else begin
+            tx_symbol <= message_byte(message_index);
+            tx_byte <= tx_symbol[8] ? hex_ascii(tx_symbol[3:0]) : tx_symbol[7:0];
+        end
+    end
 
     uart_tx #(
         .CLOCK_FREQ_HZ(CLOCK_FREQ_HZ),
@@ -275,7 +368,7 @@ module uart_debug_logger #(
             interval_count    <= 32'd0;
             boot_pending      <= 1'b1;
             message_active    <= 1'b0;
-            message_index     <= 7'd0;
+            message_index     <= 8'd0;
             tx_start          <= 1'b0;
             snap_pll_ready    <= 1'b0;
             snap_sd_init_done <= 1'b0;
@@ -291,11 +384,15 @@ module uart_debug_logger #(
             snap_sector_byte_count <= 9'd0;
             snap_sd_state     <= 5'd0;
             snap_sd_cmd_error_latched <= 1'b0;
-            snap_resource_valid <= 4'd0;
+            snap_resource_valid <= 16'd0;
+            snap_image_count <= 5'd0;
+            snap_root_crc <= 0;
+            snap_root_bytes <= 0;
             snap_sector_done_count <= 16'd0;
             snap_load_image_number<=0; snap_load_cluster<=0; snap_load_size<=0;
             snap_load_pipeline<=0;
-            snap_playlist<=0;
+            snap_pcm_status<=0; snap_playlist<=0;
+            snap_accepted_cluster<=0; byte_settle<=0;
         end else begin
             // tx_start 是送给 uart_tx 的寄存器脉冲。由于两个 always 块在同一
             // 个时钟沿使用非阻塞赋值，当前 always 置 tx_start=1 后，uart_tx
@@ -303,6 +400,7 @@ module uart_debug_logger #(
             // 的这一拍递增，否则 uart_tx 采样到的将是下一个字符，导致第 0
             // 个字符丢失、后续字符隔一个丢一个。
             tx_start <= 1'b0;
+            if(byte_settle!=0) byte_settle<=byte_settle-1'b1;
 
             if (!message_active) begin
                 if (interval_count < LOG_INTERVAL_CYCLES - 1)
@@ -324,12 +422,17 @@ module uart_debug_logger #(
                     snap_sd_state      <= sd_state;
                     snap_sd_cmd_error_latched <= sd_cmd_error_latched;
                     snap_resource_valid <= resource_valid;
+                    snap_image_count <= image_count;
+                    snap_root_crc <= root_crc;
+                    snap_root_bytes <= root_bytes;
                     snap_sector_done_count <= sector_done_count;
                     snap_load_image_number<=load_image_number;
                     snap_load_cluster<=load_cluster; snap_load_size<=load_size;
                     snap_load_pipeline<=load_pipeline;
-                    snap_playlist<=playlist_snapshot;
-                    message_index      <= 7'd0;
+                    snap_pcm_status<=pcm_status; snap_playlist<=playlist_snapshot;
+                    snap_accepted_cluster<=accepted_cluster;
+                    byte_settle<=4;
+                    message_index      <= 8'd0;
                     message_active     <= 1'b1;
                     boot_pending       <= 1'b0;
                     interval_count     <= 32'd0;
@@ -341,11 +444,12 @@ module uart_debug_logger #(
                 if (message_index == MESSAGE_LENGTH - 1) begin
                     // 最后一个字节（LF）已经被接受；允许下一轮定时重新组帧。
                     message_active <= 1'b0;
-                    message_index  <= 7'd0;
+                    message_index  <= 8'd0;
                 end else begin
                     message_index <= message_index + 1'b1;
+                    byte_settle<=4;
                 end
-            end else if (!tx_busy) begin
+            end else if (!tx_busy && byte_settle==0) begin
                 // 只发起请求，暂不改变 message_index。下一拍进入上面的
                 // tx_start 分支后，才确认这个字符确实交给了 uart_tx。
                 tx_start <= 1'b1;

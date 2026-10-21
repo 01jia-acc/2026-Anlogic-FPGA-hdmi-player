@@ -41,7 +41,7 @@
 //
 //   clk          ：板载输入时钟，复位计数和数码管扫描
 //   sd_card_clk  ：SD 卡读取域，约 100 MHz
-//   ext_mem_clk  ：SDRAM 控制域，约 125 MHz
+//   ext_mem_clk  ：SDRAM 控制域，50 MHz
 //   video_clk    ：640×480 视频像素域，约 25 MHz
 //
 // 【先只追踪这 10 个关键变量】
@@ -122,7 +122,7 @@ wire Sdr_busy;            // 【SDRAM 输出→top/frame_read_write】SDRAM 当�
 // sys_pll：SD 卡时钟、SDRAM 时钟、SDRAM 相移时钟。
 // video_pll：视频像素时钟、HDMI 5 倍串行时钟。
 wire sd_card_clk;         // 【sys_pll 输出→SD 链路】SD 卡侧时钟，约 100 MHz
-wire ext_mem_clk;         // 【sys_pll 输出→SDRAM 链路】存储器控制时钟，约 125 MHz
+wire ext_mem_clk;         // 【sys_pll 输出→SDRAM 链路】存储器控制时钟，50 MHz
 wire ext_mem_clk_sft;     // 【sys_pll 输出→sdram】SDRAM 相移时钟
 wire video_clk;           // 【video_pll 输出→视频链路】像素时钟，约 25 MHz
 wire hdmi_5x_clk;         // 【video_pll 输出→HDMI PHY】高速串行时钟
@@ -151,13 +151,16 @@ wire        debug_load_busy;
 wire [7:0]  debug_load_error;
 wire [4:0] debug_load_image_number;
 wire [31:0] debug_load_cluster, debug_load_size;
+wire [31:0] debug_source_cluster;
 wire [63:0] debug_load_pipeline;
 wire [63:0] debug_playlist_sd;
 wire [95:0] debug_playlist_uart;
 wire debug_playlist_ready;
+wire [159:0] debug_pcm_status;
 wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
+wire pcm_commit_ack;
 wire zoom_mode_sd;
 wire [1:0] zoom_level_sd, display_zoom_level;
 wire [31:0] thumbnail_sd, display_thumbnail, thumbnail_reader_descriptor;
@@ -169,7 +172,10 @@ wire [31:0] debug_sector_lba;
 wire [8:0]  debug_sector_byte_count;
 wire        debug_sector_active;
 wire [15:0] debug_sector_done_count;
-wire [3:0]  debug_resource_valid;
+wire [15:0] debug_resource_valid;
+wire [4:0] debug_image_count;
+wire [31:0] debug_root_crc;
+wire [15:0] debug_root_bytes;
 wire [4:0]  debug_sd_state;
 wire        debug_sd_cmd_error;
 wire        debug_sd_cmd_error_latched;
@@ -431,6 +437,8 @@ sd_card_bmp_fat32 #(
     .pcm_valid(pcm_stream_valid), .pcm_active(pcm_stream_active),
     .pcm_end(), .pcm_underflow(), .pcm_error(pcm_stream_error),
     .pcm_mode(pcm_mode),
+    .pcm_image_id_pix(video_image_id), .pcm_commit_toggle_pix(display_commit_toggle),
+    .pcm_commit_ack(pcm_commit_ack),
     .clk               (sd_card_clk),          // 输入：SD 卡/BMP 控制时钟
     .rst               (rst_all),              // 输入：统一高有效复位
     .key_next          (key1),                 // 输入：手动下一张按键
@@ -470,17 +478,22 @@ sd_card_bmp_fat32 #(
     .debug_load_error  (debug_load_error),
     .debug_load_image_number(debug_load_image_number),
     .debug_load_cluster(debug_load_cluster), .debug_load_size(debug_load_size),
+    .debug_source_cluster(debug_source_cluster),
     .debug_scanner_state(debug_scanner_state),
     .debug_sector_lba(debug_sector_lba),
     .debug_sector_byte_count(debug_sector_byte_count),
     .debug_sector_active(debug_sector_active),
     .debug_sector_done_count(debug_sector_done_count),
     .debug_resource_valid(debug_resource_valid),
+    .debug_image_count(debug_image_count),
+    .debug_root_crc(debug_root_crc),
+    .debug_root_bytes(debug_root_bytes),
     .debug_sd_state(debug_sd_state),
     .debug_sd_cmd_error(debug_sd_cmd_error),
     .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched),
     .debug_load_pipeline(debug_load_pipeline),
-    .debug_playlist(debug_playlist_sd)
+    .debug_playlist(debug_playlist_sd),
+    .debug_pcm_status(debug_pcm_status)
  );
 
 // ============================================================================
@@ -533,11 +546,16 @@ uart_debug_logger #(
     .sd_state       (debug_sd_state),
     .sd_cmd_error_latched(debug_sd_cmd_error_latched),
     .resource_valid (debug_resource_valid),
+    .image_count    (debug_image_count),
+    .root_crc(debug_root_crc),
+    .root_bytes(debug_root_bytes),
     .sector_done_count(debug_sector_done_count),
     .load_image_number(debug_load_image_number),
     .load_cluster(debug_load_cluster), .load_size(debug_load_size),
+    .accepted_cluster(debug_source_cluster),
     .load_pipeline(debug_load_pipeline),
     .playlist_snapshot(debug_playlist_uart[63:0]),
+    .pcm_status(debug_pcm_status),
     .tx             (uart_txd)
 );
 
@@ -962,6 +980,7 @@ media_hdmi_audio_bridge #(
 ) u_media_hdmi_audio_bridge (
     .pcm_active(pcm_stream_active), .pcm_valid(pcm_stream_valid),
     .pcm_mode_sd(pcm_mode),
+    .pcm_commit_ack_sd(pcm_commit_ack),
     .stream_sample(pcm_stream_sample), .pcm_ready(pcm_stream_ready),
     .pixel_clk(video_clk), .rst(rst_all),
     .display_valid_sd(video_display_valid), .media_id_sd(video_image_id[1:0]),
