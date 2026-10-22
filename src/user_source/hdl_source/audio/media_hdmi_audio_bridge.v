@@ -7,11 +7,13 @@ module media_hdmi_audio_bridge #(
     parameter integer TEST_ONLY = 0,
     parameter integer PCM_ENABLE = 0,
     parameter [7:0] VOLUME = 8'd192,
+    parameter integer DYNAMIC_VOLUME = 0,
     parameter integer BLIP_SAMPLES = 4800,
     parameter integer NOTE_SAMPLES = 12000
 ) (
     input  wire        pixel_clk,
     input  wire        rst,
+    input  wire [4:0]  volume_level, // pixel domain, 0..20 = 0..100%
     input  wire        display_valid_sd,
     input  wire [1:0]  media_id_sd,
     input  wire        commit_toggle_sd,
@@ -87,8 +89,32 @@ module media_hdmi_audio_bridge #(
     // PCM模式缺文件、换音或欠载时静音，不自动回退琶音或测试音。
     wire signed [15:0] selected_sample = pcm_selected ? (use_pcm && pcm_valid ? stream_sample : 16'sd0) :
                                        use_media ? media_sample : test_sample;
-    wire signed [24:0] scaled_sample = selected_sample * $signed({1'b0, VOLUME});
-    // Gain is 0..255 / 256, so even full-scale signed file samples cannot clip.
+    // Small gain table avoids a runtime divider. Unity=256 fits nine bits.
+    reg [8:0] target_gain;
+    always @* begin
+        case(volume_level)
+            0:target_gain=0;     1:target_gain=13;    2:target_gain=26;
+            3:target_gain=38;    4:target_gain=51;    5:target_gain=64;
+            6:target_gain=77;    7:target_gain=90;    8:target_gain=102;
+            9:target_gain=115;  10:target_gain=128;  11:target_gain=141;
+            12:target_gain=154; 13:target_gain=166;  14:target_gain=179;
+            15:target_gain=192; 16:target_gain=205;  17:target_gain=218;
+            18:target_gain=230; 19:target_gain=243;
+            default:target_gain=256;
+        endcase
+    end
+    reg [8:0] current_gain;
+    // Slew by 1/256 per accepted sample (<=5.34 ms for the whole range).
+    // Volume never alters the sample rate, PCM position or ACR timing.
+    always @(posedge pixel_clk or posedge rst)
+        if(rst) current_gain<={1'b0,VOLUME};
+        else if(sample_tick && DYNAMIC_VOLUME) begin
+            if(current_gain<target_gain) current_gain<=current_gain+1'b1;
+            else if(current_gain>target_gain) current_gain<=current_gain-1'b1;
+        end
+    wire [8:0] gain=DYNAMIC_VOLUME ? current_gain : {1'b0,VOLUME};
+    wire signed [25:0] scaled_sample = selected_sample * $signed({1'b0, gain});
+    // Gain is <= unity, including signed -32768: no overflow/clipping.
     wire signed [15:0] pcm_sample = scaled_sample >>> 8;
 
     pcm_test_tone u_test_tone (

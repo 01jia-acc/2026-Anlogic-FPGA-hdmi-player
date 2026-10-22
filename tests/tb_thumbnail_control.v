@@ -1,12 +1,15 @@
 `timescale 1ns/1ps
 // Real keys/scheduler/display commit/mailbox. File completion and the reader's
 // one-clock-delayed descriptor capture are modeled; reader RGB tested separately.
-module tb_thumbnail_control #(parameter SWITCH_TEST=0);
+module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0);
     reg clk=0, pix_clk=0, rst=1;
     always #5 clk=~clk;
     always #20 pix_clk=~pix_clk;
     reg key_next=1, key_auto=1, key_audio=1, frame_req=0, write_toggle=0;
     reg switch_pcm_n=1, switch_zoom_n=1;
+    reg switch_volume_n=1;
+    wire volume_mode;
+    wire [4:0] volume_level;
     reg scan_done=0, source_done=0;
     reg [15:0] resources=16'hffff;
     reg [511:0] clusters=0, sizes=0;
@@ -24,10 +27,11 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0);
     reg saved_audio;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
         .LOAD_TIMEOUT_MS(200000), .PCM_ENABLE(1), .THUMBNAIL_ENABLE(1),
-        .SWITCH_MODE_ENABLE(SWITCH_TEST)) dut (
+        .SWITCH_MODE_ENABLE(SWITCH_TEST), .VOLUME_CONTROL_ENABLE(VOLUME_TEST)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pix_clk), .pcm_ready(1'b0),
         .key_next(key_next), .key_auto(key_auto), .key_audio_mode(key_audio),
         .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
+        .switch_volume_n(switch_volume_n), .volume_mode(volume_mode), .volume_level(volume_level),
         .bmp_width(16'd640), .bmp_height(16'd480), .SD_MISO(1'b1),
         .display_valid(display_valid), .display_image_id(image_id),
         .display_ack_valid(ack_valid), .display_ack_bank(ack_bank), .display_ack_image_id(ack_id),
@@ -68,6 +72,57 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0);
                 @(negedge pix_clk); frame_req=0;
                 repeat(30) @(negedge pix_clk);
             end
+        end
+    endtask
+    task volume_scenarios;
+        integer n;
+        reg [31:0] saved_descriptor;
+        begin
+            fill_window;
+            if(volume_mode || volume_level!=15) $fatal(1,"Volume startup");
+            repeat(5) begin
+                switch_volume_n=0; repeat(10) @(negedge clk);
+                switch_volume_n=1; repeat(10) @(negedge clk);
+                if(volume_mode) $fatal(1,"SW2 bounce");
+            end
+            switch_volume_n=0; repeat(65) @(negedge clk);
+            press(2,65); if(volume_level!=16) $fatal(1,"Volume up");
+            press(4,65); if(volume_level!=15) $fatal(1,"Volume down");
+            press(2,280); press(4,280);
+            if(volume_level!=15 || image_id!=0 || dut.auto_play_en)
+                $fatal(1,"Volume long hold leaked to navigation");
+            for(n=0;n<25;n=n+1) press(2,65);
+            if(volume_level!=20) $fatal(1,"Upper clamp");
+            for(n=0;n<25;n=n+1) press(4,65);
+            if(volume_level!=0 || image_id!=0 || dut.auto_play_en) $fatal(1,"Lower clamp/nav isolation");
+            // A held gesture must not become a navigation event on SW2 OFF.
+            key_next=0; key_auto=0; repeat(65) @(negedge clk);
+            switch_volume_n=1; repeat(65) @(negedge clk);
+            key_next=1; key_auto=1; repeat(65) @(negedge clk);
+            if(image_id!=0 || dut.auto_play_en || volume_level!=0) $fatal(1,"OFF held gesture");
+            // Nor should a normal-mode gesture become volume on SW2 ON.
+            key_next=0; key_auto=0; repeat(65) @(negedge clk);
+            switch_volume_n=0; repeat(65) @(negedge clk);
+            key_next=1; key_auto=1; repeat(65) @(negedge clk);
+            if(image_id!=0 || dut.auto_play_en || volume_level!=0) $fatal(1,"ON held gesture");
+            switch_zoom_n=0; repeat(65) @(negedge clk);
+            press(2,65); press(2,65);
+            if(volume_level!=2 || zoom_level!=1) $fatal(1,"Zoom priority");
+            press(3,65); frame; saved_descriptor=descriptor;
+            press(2,65); press(4,65);
+            if(volume_level!=2 || descriptor!=saved_descriptor) $fatal(1,"Preview priority");
+            switch_volume_n=1; repeat(65) @(negedge clk);
+            press(2,65);
+            if(descriptor[21:20]==saved_descriptor[21:20]) $fatal(1,"Preview navigation restore");
+            switch_zoom_n=1; repeat(65) @(negedge clk); frame;
+            press(4,65); if(!dut.auto_play_en) $fatal(1,"Auto toggle restore");
+            switch_volume_n=0; repeat(4000) @(negedge clk);
+            if(image_id!=0 || !dut.auto_play_en || dut.auto_cnt!=0) $fatal(1,"Auto pause");
+            switch_volume_n=1; repeat(100) @(negedge clk);
+            if(dut.auto_cnt==0) $fatal(1,"Auto resume");
+            switch_volume_n=0; boot;
+            if(!volume_mode || volume_level!=15) $fatal(1,"SW2 reset ON");
+            $display("PASS: SW2 debounce, 5%% steps/clamps/reset, short/long presses, held-mode cancellation, normal/zoom/preview ownership, auto pause/resume");
         end
     endtask
     task switch_scenarios;
@@ -188,6 +243,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0);
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=8'd0;
         boot;
+        if(VOLUME_TEST) begin volume_scenarios; $finish; end
         if(SWITCH_TEST) begin switch_scenarios; $finish; end
         // Entry queues until the complete logical window is available.
         press(3,280); press(3,65);

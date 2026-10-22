@@ -15,7 +15,8 @@ module sd_card_bmp_fat32 #(
     parameter integer LOAD_TIMEOUT_MS   = 5_000,
     parameter integer PCM_ENABLE = 0,
     parameter integer THUMBNAIL_ENABLE = 0,
-    parameter integer SWITCH_MODE_ENABLE = 0
+    parameter integer SWITCH_MODE_ENABLE = 0,
+    parameter integer VOLUME_CONTROL_ENABLE = 0
 ) (
     // ===================== 端口：系统时钟/复位 =====================
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
@@ -29,6 +30,9 @@ module sd_card_bmp_fat32 #(
     output wire pcm_valid, pcm_active, pcm_end, pcm_underflow,
     output wire [7:0] pcm_error,
     output reg pcm_mode,
+    input wire switch_volume_n, // SW2: ON=volume keys
+    output wire volume_mode,
+    output wire [4:0] volume_level, // 0..20, 5% per step, reset=15 (75%)
     output reg zoom_mode,
     output reg [1:0] zoom_level, // 0=0.5x, 1=1x, 2=1.5x, 3=2x
     // [23]=menu, [22]=transaction epoch, [21:20]=focus bank,
@@ -363,6 +367,21 @@ module sd_card_bmp_fat32 #(
         assign switch_pcm_stable=1'b1;
         assign switch_zoom_stable=1'b1;
     end endgenerate
+    wire volume_switch_stable;
+    generate if(VOLUME_CONTROL_ENABLE) begin : g_volume_switch
+        key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) volume_switch (
+            .clk(clk), .rst(rst), .button_in(switch_volume_n),
+            .press_pulse(), .button_stable_out(volume_switch_stable));
+    end else begin : g_no_volume_switch
+        assign volume_switch_stable=1'b1;
+    end endgenerate
+    wire navigation_keys_enabled;
+    volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES)) u_volume_keys (
+        .clk(clk), .rst(rst), .mode(!volume_switch_stable),
+        .up_press(key_next_press), .down_press(key_auto_press),
+        .up_released(key_next_stable), .down_released(key_auto_stable),
+        .navigation_enabled(navigation_keys_enabled), .level(volume_level));
+    assign volume_mode=!volume_switch_stable;
     always @(posedge clk or posedge rst) begin
         if(rst) begin
             pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0;
@@ -424,16 +443,18 @@ module sd_card_bmp_fat32 #(
                     end
                 end
             end
-            if(key_next_press) next_down_seen<=1;
-            if(key_next_stable && next_down_seen) begin
+            if(!navigation_keys_enabled) next_down_seen<=0;
+            else if(key_next_press) next_down_seen<=1;
+            if(navigation_keys_enabled && key_next_stable && next_down_seen) begin
                 next_down_seen<=0;
                 if(thumbnail_mode) begin
                     if(thumbnail_ready && !thumbnail_action) thumbnail_focus<=thumbnail_focus+1'b1;
                 end else if(zoom_mode) begin if(zoom_level<3) zoom_level<=zoom_level+1'b1; end
                 else next_release_pulse<=1;
             end
-            if(key_auto_press && zoom_mode) zoom_auto_down<=1;
-            if(key_auto_stable && zoom_auto_down) begin
+            if(!navigation_keys_enabled) zoom_auto_down<=0;
+            else if(key_auto_press && zoom_mode) zoom_auto_down<=1;
+            if(navigation_keys_enabled && key_auto_stable && zoom_auto_down) begin
                 zoom_auto_down<=0;
                 if(thumbnail_mode) begin
                     if(thumbnail_ready && !thumbnail_action) thumbnail_focus<=thumbnail_focus-1'b1;
@@ -596,10 +617,10 @@ module sd_card_bmp_fat32 #(
                 if(scan_completed && img_found_count != 0) begin
                     if(thumbnail_hold) begin next_req_pending<=0; prev_req_pending<=0; end
                     else if(next_release_pulse) next_req_pending<=1;
-                    if(key_auto_press && !zoom_mode) key_auto_down_seen<=1;
-                    if(zoom_mode) begin
+                    if(key_auto_press && !zoom_mode && navigation_keys_enabled) key_auto_down_seen<=1;
+                    if(zoom_mode || !navigation_keys_enabled) begin
                         long_press_cnt<=0; long_press_marked<=0; key_auto_down_seen<=0;
-                    end else if(!key_auto_stable) begin
+                    end else if(!key_auto_stable && key_auto_down_seen) begin
                         if(long_press_cnt < LONG_PRESS_CYCLES-1) long_press_cnt<=long_press_cnt+1'b1;
                         else if(!long_press_marked) begin
                             long_press_marked<=1;
@@ -612,7 +633,7 @@ module sd_card_bmp_fat32 #(
                             key_auto_down_seen<=0;
                         end
                     end
-                    if(auto_play_en && !zoom_mode && display_valid && display_settled &&
+                    if(auto_play_en && !volume_mode && !zoom_mode && display_valid && display_settled &&
                        (!load_busy || load_is_prefetch) &&
                        !next_req_pending && !prev_req_pending && preload_next_idx>=preload_limit &&
                        img_found_count>1) begin
@@ -673,6 +694,47 @@ module sd_card_bmp_fat32 #(
                         source_done_seen<=0; write_done_seen<=0; load_timeout_cnt<=0;
                     end
                 end
+            end
+        end
+    end
+endmodule
+
+// Debounced key ownership. A switch transition cancels held gestures in both
+// directions. Only a fresh short press/release changes volume; no auto-repeat.
+module volume_key_control #(parameter integer LONG_PRESS_CYCLES=100000000) (
+    input wire clk, rst, mode,
+    input wire up_press, down_press, up_released, down_released,
+    output wire navigation_enabled,
+    output reg [4:0] level
+);
+    localparam integer COUNT_W=LONG_PRESS_CYCLES>1 ? $clog2(LONG_PRESS_CYCLES+1) : 1;
+    reg mode_q, blocked, up_seen, down_seen;
+    reg [COUNT_W-1:0] up_count, down_count;
+    wire changed=mode!=mode_q;
+    wire up_short=up_seen && up_released && up_count<LONG_PRESS_CYCLES;
+    wire down_short=down_seen && down_released && down_count<LONG_PRESS_CYCLES;
+    assign navigation_enabled=!mode && !changed && !blocked;
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            level<=15; mode_q<=0; blocked<=1;
+            up_seen<=0; down_seen<=0; up_count<=0; down_count<=0;
+        end else begin
+            mode_q<=mode;
+            if(changed) blocked<=1;
+            else if(up_released && down_released) blocked<=0;
+            if(changed || blocked || !mode) begin
+                up_seen<=0; down_seen<=0; up_count<=0; down_count<=0;
+            end else begin
+                if(up_press) begin up_seen<=1; up_count<=0; end
+                else if(up_seen && !up_released && up_count<LONG_PRESS_CYCLES)
+                    up_count<=up_count+1'b1;
+                if(down_press) begin down_seen<=1; down_count<=0; end
+                else if(down_seen && !down_released && down_count<LONG_PRESS_CYCLES)
+                    down_count<=down_count+1'b1;
+                if(up_released) up_seen<=0;
+                if(down_released) down_seen<=0;
+                if(up_short && !down_short && level<20) level<=level+1'b1;
+                else if(down_short && !up_short && level>0) level<=level-1'b1;
             end
         end
     end

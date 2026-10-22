@@ -65,6 +65,7 @@ module top(
     input                       key3,           // KEY3: thumbnail open/confirm; hold to cancel
     input                       switch_pcm_n,   // SW3 (C6): ON=PCM, OFF=arpeggio
     input                       switch_zoom_n,  // SW4 (C5): ON=zoom, OFF=normal
+    input                       switch_volume_n, // SW2 (C7): ON=volume adjustment
 
 	output [5:0]                seg_sel,        // 【输出到 seg_scan/数码管】位选
 	output [7:0]                seg_data,       // 【输出到数码管】段选数据
@@ -171,6 +172,10 @@ wire zoom_mode_sd;
 wire [1:0] zoom_level_sd, display_zoom_level;
 wire [31:0] thumbnail_sd, display_thumbnail, thumbnail_reader_descriptor;
 wire [95:0] osd_sd_snapshot; // [11]=zoom mode, [10:9]=zoom level
+wire volume_mode_sd;
+wire [4:0] volume_level_sd;
+// Snapshot bit 50 marks initialized data, so reset keeps the default 75%.
+wire [4:0] volume_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[48:44] : 5'd15;
 wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
 wire [3:0]  debug_scanner_state;
@@ -441,6 +446,7 @@ end
 //   输出：SD SPI 信号、写帧请求、像素写入流、双缓冲索引
 sd_card_bmp_fat32 #(
     .SWITCH_MODE_ENABLE(1),
+    .VOLUME_CONTROL_ENABLE(1),
     .THUMBNAIL_ENABLE(1),
     .PCM_ENABLE(AUDIO_PCM_ENABLE && !AUDIO_TEST_ONLY),
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
@@ -461,6 +467,7 @@ sd_card_bmp_fat32 #(
     .key_auto          (key2),                 // 输入：自动轮播按键
     .key_audio_mode    (key3),                 // KEY3: thumbnail open/confirm/cancel
     .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
+    .switch_volume_n(switch_volume_n), .volume_mode(volume_mode_sd), .volume_level(volume_level_sd),
     // state_code 只用于数码管调试，不参与图像数据传输。
     .state_code        (state_code),           // 输出：当前扫描/加载状态码
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
@@ -708,6 +715,7 @@ wire [11:0] osd_x, osd_y;
 wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像素域坐标
 wire [23:0] zoom_rgb;
 wire [23:0] thumbnail_rgb;
+wire [23:0] volume_rgb;
 wire [23:0] waveform_rgb;
 wire waveform_vs, waveform_de, waveform_frame_start;
 wire [11:0] waveform_x, waveform_y;
@@ -725,7 +733,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({52'd0,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({45'd0,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -785,12 +793,18 @@ thumbnail_status_osd #(.THUMBNAIL_DIV(4)) u_thumbnail_status (
     .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
     .descriptor(display_thumbnail), .rgb_in(zoom_rgb), .rgb_out(thumbnail_rgb)
 );
+volume_status_osd u_volume_status (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .level(volume_level_pix), .adjust_mode(osd_sd_snapshot[49]),
+    .rgb_in(thumbnail_rgb), .rgb_out(volume_rgb)
+);
 // Lesson waveform above the subtitle band (starts at y=438). Listen to the
 // exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(thumbnail_rgb),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(volume_rgb),
     .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23]),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
     .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
@@ -1011,8 +1025,10 @@ startup_pulse #(
 // The bridge's existing input synchronizers also accept same-clock signals.
 media_hdmi_audio_bridge #(
     .PCM_ENABLE(AUDIO_PCM_ENABLE),
+    .DYNAMIC_VOLUME(1),
     .CLOCK_HZ(25_000_000), .TEST_ONLY(AUDIO_TEST_ONLY), .VOLUME(AUDIO_VOLUME)
 ) u_media_hdmi_audio_bridge (
+    .volume_level(volume_level_pix),
     .pcm_active(pcm_stream_active), .pcm_valid(pcm_stream_valid),
     .pcm_mode_sd(pcm_mode),
     .pcm_commit_ack_sd(pcm_commit_ack),

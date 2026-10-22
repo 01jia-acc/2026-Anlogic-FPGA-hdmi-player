@@ -84,12 +84,12 @@ module promax_audio_waveform #(
     reg vs1,de1,enabled1,valid1,frame1;
     wire [11:0] column_x=(x1-WAVE_X)%SAMPLE_SPACING;
     wire [11:0] from_bottom=WAVE_Y+WAVE_HEIGHT-1-y1;
-    // One quiet baseline block, up to four blocks. 4px lit + 4px gap.
+    // One quiet baseline block, up to five blocks. 4px lit + 4px gap.
     // At the default 16px column pitch, blocks are 12px wide with 4px gaps.
     // Compressed thresholds keep ordinary speech/arpeggios visible without
     // normalizing quiet files to full height: 768 / 2304 / 6144 in PCM units.
     // These thresholds affect visualization only, never the HDMI audio gain.
-    wire [2:0] blocks=!valid1 ? 3'd1 : sample_q>=24 ? 3'd4 :
+    wire [2:0] blocks=!valid1 ? 3'd1 : sample_q>=48 ? 3'd5 : sample_q>=24 ? 3'd4 :
         sample_q>=9 ? 3'd3 : sample_q>=3 ? 3'd2 : 3'd1;
     wire in_wave=enabled1 && de1 && x1>=WAVE_X && x1<WAVE_X+WAVE_WIDTH &&
         y1>=WAVE_Y && y1<WAVE_Y+WAVE_HEIGHT;

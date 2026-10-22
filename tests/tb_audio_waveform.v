@@ -46,14 +46,14 @@ module tb_audio_waveform;
         integer b;
         begin
             blocks=0;
-            for(b=0;b<5;b=b+1) begin
+            for(b=0;b<6;b=b+1) begin
                 pixel(68+col*16,430-b*8);
                 if(hit) begin
                     if(out_rgb!==24'h20ee70 || blocks!=b) $fatal(1,"bar hole / wrong color");
                     blocks=blocks+1;
                 end else if(out_rgb!==rgb) $fatal(1,"background changed");
             end
-            if(blocks<1 || blocks>4) $fatal(1,"bar exceeds four blocks");
+            if(blocks<1 || blocks>5) $fatal(1,"bar exceeds five blocks");
         end
     endtask
     integer xx,yy;
@@ -105,12 +105,13 @@ module tb_audio_waveform;
         // Distinct levels prove newest-right ordering, shift direction, partial
         // history masking and more than two complete circular-buffer wraps.
         for(f=0;f<70;f=f+1) begin
-            case(f%5)
+            case(f%6)
                 0: begin level=128;target=1;end
                 1: begin level=3072;target=3;end
                 2: begin level=1024;target=2;end
-                3: begin level=32768;target=4;end
+                3: begin level=32768;target=5;end
                 4: begin level=2048;target=2;end
+                5: begin level=8192;target=4;end
             endcase
             feed(level,16000);
             check_history;
@@ -118,7 +119,7 @@ module tb_audio_waveform;
         end
         feed(32768,8000);
         for(f=0;f<32;f=f+1) begin feed(32768,800);boundary;end
-        scan(4);
+        scan(5);
         feed(32768,8000);boundary;
         for(f=0;f<6;f=f+1) begin feed(0,800);boundary;end
         level_at(31,blocks);
@@ -135,9 +136,9 @@ module tb_audio_waveform;
         enable=0;pixel(68,430);if(hit || out_rgb!==rgb) $fatal(1,"preview hiding failed");
         feed(32768,8000);boundary;
         enable=1;
-        level_at(31,blocks);if(blocks!=4) $fatal(1,"hidden capture stopped");
+        level_at(31,blocks);if(blocks!=5) $fatal(1,"hidden capture stopped");
         boundary;level_at(31,blocks);if(blocks!=1) $fatal(1,"stopped stream stale newest");
-        level_at(30,blocks);if(blocks!=4) $fatal(1,"history erased on stop");
+        level_at(30,blocks);if(blocks!=5) $fatal(1,"history erased on stop");
         for(f=0;f<32;f=f+1) boundary;
         scan(1);
         @(negedge clk);rst_n=0;repeat(3) @(negedge clk);rst_n=1;
