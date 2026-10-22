@@ -1,11 +1,12 @@
 `timescale 1ns/1ps
 // Real keys/scheduler/display commit/mailbox. File completion and the reader's
 // one-clock-delayed descriptor capture are modeled; reader RGB tested separately.
-module tb_thumbnail_control;
+module tb_thumbnail_control #(parameter SWITCH_TEST=0);
     reg clk=0, pix_clk=0, rst=1;
     always #5 clk=~clk;
     always #20 pix_clk=~pix_clk;
     reg key_next=1, key_auto=1, key_audio=1, frame_req=0, write_toggle=0;
+    reg switch_pcm_n=1, switch_zoom_n=1;
     reg scan_done=0, source_done=0;
     reg [15:0] resources=16'hffff;
     reg [511:0] clusters=0, sizes=0;
@@ -22,9 +23,11 @@ module tb_thumbnail_control;
     integer loads=0, i, saved_loads, loading_bank, k;
     reg saved_audio;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
-        .LOAD_TIMEOUT_MS(200000), .PCM_ENABLE(1), .THUMBNAIL_ENABLE(1)) dut (
+        .LOAD_TIMEOUT_MS(200000), .PCM_ENABLE(1), .THUMBNAIL_ENABLE(1),
+        .SWITCH_MODE_ENABLE(SWITCH_TEST)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pix_clk), .pcm_ready(1'b0),
         .key_next(key_next), .key_auto(key_auto), .key_audio_mode(key_audio),
+        .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
         .bmp_width(16'd640), .bmp_height(16'd480), .SD_MISO(1'b1),
         .display_valid(display_valid), .display_image_id(image_id),
         .display_ack_valid(ack_valid), .display_ack_bank(ack_bank), .display_ack_image_id(ack_id),
@@ -65,6 +68,54 @@ module tb_thumbnail_control;
                 @(negedge pix_clk); frame_req=0;
                 repeat(30) @(negedge pix_clk);
             end
+        end
+    endtask
+    task switch_scenarios;
+        begin
+            if(pcm_mode || zoom_mode) $fatal(1,"OFF switches startup");
+            // No short contact bounce may change the selected mode.
+            repeat(5) begin
+                switch_pcm_n=0; switch_zoom_n=0; repeat(10) @(negedge clk);
+                switch_pcm_n=1; switch_zoom_n=1; repeat(10) @(negedge clk);
+                if(pcm_mode || zoom_mode) $fatal(1,"Switch bounce leaked");
+            end
+            press(3,65); press(3,280);
+            if(pcm_mode || zoom_mode) $fatal(1,"KEY3 still changes modes");
+            switch_pcm_n=0; switch_zoom_n=0; repeat(65) @(negedge clk);
+            if(!pcm_mode || !zoom_mode) $fatal(1,"Independent ON modes");
+            press(2,65);
+            if(zoom_level!=2 || image_id!=0) $fatal(1,"Switch zoom key routing");
+            press(3,65);
+            if(!dut.thumbnail_pending) $fatal(1,"Queued menu entry");
+            switch_zoom_n=1; repeat(65) @(negedge clk);
+            if(zoom_mode || dut.thumbnail_pending || descriptor[23] || !pcm_mode)
+                $fatal(1,"OFF must cancel queued menu without changing PCM");
+            fill_window;
+            switch_zoom_n=0; repeat(65) @(negedge clk);
+            press(3,65);
+            if(!descriptor[23]) $fatal(1,"Menu entry");
+            // Switch OFF before the reader has acknowledged entry: keep bank
+            // protection until entry ACK, then publish cancel, then await exit ACK.
+            switch_zoom_n=1; repeat(65) @(negedge clk);
+            if(!descriptor[23] || !zoom_mode) $fatal(1,"Unacknowledged entry was abandoned");
+            frame;
+            if(descriptor[23] || zoom_mode || dut.thumbnail_hold || image_id!=0)
+                $fatal(1,"Safe switch exit failed");
+            switch_zoom_n=0; repeat(65) @(negedge clk);
+            press(3,65); frame; press(2,65); press(3,65); frame;
+            if(image_id!=1 || !zoom_mode || descriptor[23] || !pcm_mode)
+                $fatal(1,"Switch menu confirmation");
+            fill_window;
+            press(3,65); frame; press(3,280); frame;
+            if(descriptor[23] || !zoom_mode) $fatal(1,"Long KEY3 cancel must stay in zoom");
+            switch_pcm_n=1; repeat(65) @(negedge clk);
+            if(pcm_mode || !zoom_mode) $fatal(1,"Audio OFF independence");
+            // Levels survive reset: ON does not require a new toggle edge.
+            switch_pcm_n=0; boot;
+            if(!pcm_mode || !zoom_mode) $fatal(1,"ON switches after reset");
+            switch_pcm_n=1; switch_zoom_n=1; repeat(65) @(negedge clk);
+            if(pcm_mode || zoom_mode) $fatal(1,"Both switches OFF");
+            $display("PASS: SW3/SW4 debounce, startup/reset ON/OFF, independent audio/zoom, KEY3 menu routing, queued entry cancellation, pre-ACK exit bank protection, confirm/cancel");
         end
     endtask
     task fill_window;
@@ -137,6 +188,7 @@ module tb_thumbnail_control;
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=8'd0;
         boot;
+        if(SWITCH_TEST) begin switch_scenarios; $finish; end
         // Entry queues until the complete logical window is available.
         press(3,280); press(3,65);
         if(descriptor[23] || !dut.thumbnail_pending) $fatal(1,"Entry did not wait for loading");
@@ -213,4 +265,8 @@ module tb_thumbnail_control;
         $finish;
     end
     initial begin #20000000; $fatal(1,"Thumbnail controller timeout"); end
+endmodule
+
+module tb_mode_switch_control;
+    tb_thumbnail_control #(.SWITCH_TEST(1)) scenario();
 endmodule

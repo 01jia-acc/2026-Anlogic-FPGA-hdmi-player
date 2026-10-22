@@ -8,8 +8,8 @@ $sources += @(Get-ChildItem "$rtl/audio/*.v" | ForEach-Object FullName)
 $sources += @(Get-ChildItem "$rtl/uart/*.v" | ForEach-Object FullName)
 $sources += "$rtl/IP/afifo_32_16_256.v"
 $sources += "$rtl/top_tf_hdmi_audio.v"
-$benches = @('tb_uart_diagnostics', 'tb_multi_bmp_scanner', 'tb_multi_bmp_cache', 'tb_thumbnail_control')
-$sources += @($benches | ForEach-Object { Join-Path $PSScriptRoot "$_.v" })
+$benches = @('tb_uart_diagnostics', 'tb_multi_bmp_scanner', 'tb_multi_bmp_cache', 'tb_thumbnail_control', 'tb_mode_switch_control')
+$sources += @($benches | Where-Object { $_ -ne 'tb_mode_switch_control' } | ForEach-Object { Join-Path $PSScriptRoot "$_.v" })
 Push-Location $simDir
 try {
     & (Join-Path $ModelSimBin 'vlib.exe') work

@@ -62,7 +62,9 @@ module top(
     input                       rst_n,          // 【输入】外部低有效总复位
     input                       key1,           // 板上 KEY2（B2）：按下并松开切下一张
     input                       key2,           // 板上 KEY4（C1）：短按轮播开/关，长按上一张
-    input                       key3,           // 板上 KEY3（B1）：短按切换 PCM/琶音
+    input                       key3,           // KEY3: thumbnail open/confirm; hold to cancel
+    input                       switch_pcm_n,   // SW3 (C6): ON=PCM, OFF=arpeggio
+    input                       switch_zoom_n,  // SW4 (C5): ON=zoom, OFF=normal
 
 	output [5:0]                seg_sel,        // 【输出到 seg_scan/数码管】位选
 	output [7:0]                seg_data,       // 【输出到数码管】段选数据
@@ -438,6 +440,7 @@ end
 //   输入：按键、SD_MISO、写帧完成通知
 //   输出：SD SPI 信号、写帧请求、像素写入流、双缓冲索引
 sd_card_bmp_fat32 #(
+    .SWITCH_MODE_ENABLE(1),
     .THUMBNAIL_ENABLE(1),
     .PCM_ENABLE(AUDIO_PCM_ENABLE && !AUDIO_TEST_ONLY),
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
@@ -456,7 +459,8 @@ sd_card_bmp_fat32 #(
     .rst               (rst_all),              // 输入：统一高有效复位
     .key_next          (key1),                 // 输入：手动下一张按键
     .key_auto          (key2),                 // 输入：自动轮播按键
-    .key_audio_mode    (key3),                 // 输入：独立音源切换按键
+    .key_audio_mode    (key3),                 // KEY3: thumbnail open/confirm/cancel
+    .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
     // state_code 只用于数码管调试，不参与图像数据传输。
     .state_code        (state_code),           // 输出：当前扫描/加载状态码
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640

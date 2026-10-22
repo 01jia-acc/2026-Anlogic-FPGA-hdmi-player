@@ -14,7 +14,8 @@ module sd_card_bmp_fat32 #(
     // 一次加载的最长允许时间；超过则发 load_abort 并报错（防坏卡永久卡死）。
     parameter integer LOAD_TIMEOUT_MS   = 5_000,
     parameter integer PCM_ENABLE = 0,
-    parameter integer THUMBNAIL_ENABLE = 0
+    parameter integer THUMBNAIL_ENABLE = 0,
+    parameter integer SWITCH_MODE_ENABLE = 0
 ) (
     // ===================== 端口：系统时钟/复位 =====================
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
@@ -39,6 +40,7 @@ module sd_card_bmp_fat32 #(
     input  wire        key_next,       // "下一张"按键
     input  wire        key_auto,       // "自动"键：短按=轮播开/关，长按=上一张
     input  wire        key_audio_mode, // 板上 KEY3：短按切换 PCM/琶音
+    input  wire        switch_pcm_n, switch_zoom_n, // SW3/SW4: closed = low
 
     // bmp_width/bmp_height 与旧版扫描参数一样仅为顶层兼容保留；FAT32 目录
     // 扫描提供图片列表，bmp24_decoder 内部校验固定的 640x480 格式。
@@ -194,6 +196,7 @@ module sd_card_bmp_fat32 #(
     reg [7:0] last_error;
     wire key_next_press, key_next_stable, key_auto_press, key_auto_stable, key_audio_mode_press;
     wire key_audio_stable;
+    wire switch_pcm_stable, switch_zoom_stable;
     reg audio_down_seen, audio_long_marked, zoom_auto_down;
     reg [31:0] audio_hold_count;
     reg [3:0] zoom_image_id;
@@ -255,7 +258,8 @@ module sd_card_bmp_fat32 #(
     // Confirm/cancel owns this cycle. Simultaneous navigation must not change
     // the exit packet's target bank after the selection has already been made.
     wire thumbnail_action = thumbnail_mode && thumbnail_ready &&
-        ((key_audio_stable && audio_down_seen && !audio_long_marked) ||
+        ((SWITCH_MODE_ENABLE && switch_zoom_stable) ||
+         (key_audio_stable && audio_down_seen && !audio_long_marked) ||
          (!key_audio_stable && audio_hold_count>=LONG_PRESS_CYCLES-1 && !audio_long_marked));
     wire write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
     // 双向邮箱确认像素域已切到所请求的帧之后，才允许复用旧显示bank。
@@ -348,6 +352,17 @@ module sd_card_bmp_fat32 #(
     key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_key_audio_mode (
         .clk(clk),.rst(rst),.button_in(key_audio_mode),.press_pulse(key_audio_mode_press),
         .button_stable_out(key_audio_stable));
+    generate if(SWITCH_MODE_ENABLE) begin : g_mode_switches
+        key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) pcm_switch (
+            .clk(clk), .rst(rst), .button_in(switch_pcm_n),
+            .press_pulse(), .button_stable_out(switch_pcm_stable));
+        key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) zoom_switch (
+            .clk(clk), .rst(rst), .button_in(switch_zoom_n),
+            .press_pulse(), .button_stable_out(switch_zoom_stable));
+    end else begin : g_key_modes
+        assign switch_pcm_stable=1'b1;
+        assign switch_zoom_stable=1'b1;
+    end endgenerate
     always @(posedge clk or posedge rst) begin
         if(rst) begin
             pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0;
@@ -364,6 +379,7 @@ module sd_card_bmp_fat32 #(
             thumbnail_select<=0;
             thumbnail_ack1<=thumbnail_ack_epoch; thumbnail_ack2<=thumbnail_ack1;
             if(thumbnail_pending && !thumbnail_hold && display_valid && display_settled &&
+               (!SWITCH_MODE_ENABLE || !switch_zoom_stable) &&
                !load_busy && preload_finished && !window_missing &&
                !next_req_pending && !prev_req_pending && !next_release_pulse &&
                key_audio_stable && !audio_down_seen) begin
@@ -384,14 +400,14 @@ module sd_card_bmp_fat32 #(
                             thumbnail_focus<=img_idx-thumbnail_start;
                         end
                     end else if(thumbnail_pending) thumbnail_pending<=0;
-                    else if(!thumbnail_hold && display_valid && display_settled)
+                    else if(!SWITCH_MODE_ENABLE && !thumbnail_hold && display_valid && display_settled)
                         zoom_mode<=~zoom_mode;
                 end
             end else begin
                 audio_hold_count<=0; audio_long_marked<=0;
                 if(audio_down_seen) begin
                     audio_down_seen<=0;
-                    if(!audio_long_marked) begin
+                    if(!audio_long_marked && (!SWITCH_MODE_ENABLE || !switch_zoom_stable)) begin
                         if(THUMBNAIL_ENABLE && thumbnail_mode) begin
                             if(thumbnail_ready && thumbnail_complete[thumbnail_focus]) begin
                                 thumbnail_selected_bank<=thumbnail_banks[thumbnail_focus*2 +:2];
@@ -404,7 +420,7 @@ module sd_card_bmp_fat32 #(
                                (!load_busy || !load_is_demand)) begin
                                 thumbnail_pending<=~thumbnail_pending;
                             end
-                        end else if(PCM_ENABLE) pcm_mode<=~pcm_mode;
+                        end else if(PCM_ENABLE && !SWITCH_MODE_ENABLE) pcm_mode<=~pcm_mode;
                     end
                 end
             end
@@ -424,6 +440,22 @@ module sd_card_bmp_fat32 #(
                 end else if(zoom_mode && zoom_level>0) zoom_level<=zoom_level-1'b1;
             end
             if(img_idx!=zoom_image_id) begin zoom_image_id<=img_idx; zoom_level<=1; end
+            if(SWITCH_MODE_ENABLE) begin
+                pcm_mode<=PCM_ENABLE && !switch_pcm_stable;
+                if(switch_zoom_stable) begin
+                    // Cancel queued entry and publish the normal cancel packet.
+                    // Keep the original bank locked until the reader ACKs it.
+                    thumbnail_pending<=0;
+                    if(thumbnail_mode) begin
+                        if(thumbnail_ready) begin
+                            thumbnail_mode<=0; thumbnail_epoch<=~thumbnail_epoch;
+                            thumbnail_focus<=img_idx-thumbnail_start;
+                            thumbnail_select<=0;
+                        end
+                    end else if(!thumbnail_hold) zoom_mode<=0;
+                end else if(!zoom_mode && !thumbnail_hold && display_valid && display_settled)
+                    zoom_mode<=1;
+            end
         end
     end
     sd_fat32_image_source #(.PCM_ENABLE(PCM_ENABLE)) u_image_source (
@@ -669,10 +701,11 @@ module key_press_debounce_fat32 #(
 );
     // 去抖所需的时钟周期数，由参数在编译期计算。
     localparam integer DEBOUNCE_CYCLES = (CLK_FREQ_HZ / 1000) * DEBOUNCE_MS;
+    localparam integer DEBOUNCE_WIDTH = DEBOUNCE_CYCLES>1 ? $clog2(DEBOUNCE_CYCLES) : 1;
     // 两级同步寄存器：先把异步按键输入带入 clk 域，再供后级使用。
     reg button_sync0, button_sync1, button_stable;
     // 只有连续 DEBOUNCE_CYCLES 个周期与稳定值不一致，才确认状态改变。
-    reg [31:0] cnt;
+    reg [DEBOUNCE_WIDTH-1:0] cnt;
 
     // 稳定电平是组合观察线；press_pulse 是时序块产生的单周期事件。
     assign button_stable_out = button_stable;
