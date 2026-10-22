@@ -13,6 +13,11 @@ foreach source {audio/pcm_stream_buffer.v audio/pcm_test_tone.v audio/pcm_media_
     }
 }
 cd [file join $repo_root src td_project]
+foreach source {SD/scrolling_subtitle.v SD/subtitle_font.v SD/audio4_subtitle_data.v SD/audio4_subtitle_timeline.v} {
+    if {[string first "$source" $project_text] < 0} {
+        error "Missing subtitle integration source in project: $source. Reload the updated .al in TD."
+    }
+}
 import_device eagle_s20.db -package EG4S20BG256
 open_project [file join $repo_root src td_project lab_ex5_i2s_v1.0.al] -single_run
 elaborate -top top

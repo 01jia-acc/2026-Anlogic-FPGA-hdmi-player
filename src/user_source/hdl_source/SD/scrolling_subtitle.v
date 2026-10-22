@@ -6,12 +6,14 @@ module scrolling_subtitle #(
     parameter integer VIEW_WIDTH=640,
     parameter integer TEXT_Y=442,
     parameter integer FRAME_DIV=1,
-    parameter integer LOOP_GAP=64
+    parameter integer LOOP_GAP=64,
+    parameter integer FILE_SUBTITLE_ENABLE=0
 )(
     input wire control_clk, pixel_clk, rst,
     input wire [7:0] rx_data,
     input wire rx_valid,
     input wire frame_start, hide,
+    input wire file_selected, file_show, file_commit_toggle, file_sample_accept,
     input wire in_vs, in_de,
     input wire [11:0] pixel_x, pixel_y,
     input wire [23:0] rgb_in,
@@ -132,31 +134,63 @@ module scrolling_subtitle #(
     // Two synchronous ROM/RAM reads, with RGB/VS/DE delayed by the same clocks.
     // No wide packed-string multiplexer and no pixel-rate divider/multiplier.
     wire [13:0] sum_x={2'd0,pixel_x}+{1'b0,scroll_offset};
-    wire [13:0] source_x=sum_x-VIEW_WIDTH;
-    wire in_text=visible && text_length!=0 && pixel_x<VIEW_WIDTH &&
+    wire [7:0] timed_glyph;
+    wire timed_visible;
+    wire [5:0] timed_length;
+    wire [11:0] timed_left=(VIEW_WIDTH-({6'd0,timed_length}<<4))>>1;
+    // Production boot paragraph is replaced by the file-4 SRT. UART text still
+    // works on other images; no unrelated boot paragraph accompanies narration.
+    wire timed_mode=FILE_SUBTITLE_ENABLE && file_selected;
+    wire scrolling_visible=visible && (!FILE_SUBTITLE_ENABLE || runtime_text) && !timed_mode;
+    wire [13:0] source_x=timed_mode ? {2'd0,pixel_x}-{2'd0,timed_left} : sum_x-VIEW_WIDTH;
+    generate if(FILE_SUBTITLE_ENABLE) begin : g_file_subtitle
+        audio4_subtitle_timeline timeline(.clk(pixel_clk), .rst(rst), .frame_start(frame_start),
+            .hide(hide), .selected(file_selected), .show(file_show),
+            .commit_toggle(file_commit_toggle), .sample_accept(file_sample_accept),
+            .character_position(source_x[9:4]), .glyph(timed_glyph),
+            .visible(timed_visible), .visible_length(timed_length));
+    end else begin : g_no_file_subtitle
+        assign timed_glyph=0;
+        assign timed_visible=0;
+        assign timed_length=0;
+    end endgenerate
+    wire timed_hit=timed_mode && timed_visible && pixel_x>=timed_left &&
+        pixel_x<timed_left+({6'd0,timed_length}<<4);
+    wire in_text=(timed_hit || (scrolling_visible && text_length!=0 &&
+        sum_x>=VIEW_WIDTH && source_x<text_width)) && pixel_x<VIEW_WIDTH &&
         pixel_y>=TEXT_Y && pixel_y<TEXT_Y+16 &&
-        sum_x>=VIEW_WIDTH && source_x<text_width;
-    wire in_band=visible && text_length!=0 && pixel_x<VIEW_WIDTH &&
+        (!FILE_SUBTITLE_ENABLE || !hide);
+    wire in_band=((timed_mode && timed_visible) || (scrolling_visible && text_length!=0)) && pixel_x<VIEW_WIDTH &&
         pixel_y>=TEXT_Y-4 && pixel_y<TEXT_Y+20;
     wire [7:0] default_glyph;
     reg [7:0] ram_glyph;
-    subtitle_default_text default_text(.clk(pixel_clk),.address(source_x[11:4]),
-        .glyph(default_glyph),.length(default_length));
+    generate if(FILE_SUBTITLE_ENABLE) begin : g_no_boot_text
+        // The SRT replaces boot scrolling text. Eliminate its unused ROM and
+        // length-dependent scroll logic from the production configuration.
+        assign default_glyph=8'h20;
+        assign default_length=0;
+    end else begin : g_boot_text
+        subtitle_default_text default_text(.clk(pixel_clk),.address(source_x[11:4]),
+            .glyph(default_glyph),.length(default_length));
+    end endgenerate
     always @(posedge pixel_clk) ram_glyph<=text_ram[{active_bank,source_x[11:4]}];
     reg [3:0] row1, col1, col2;
     reg hit1, hit2, band1, band2;
+    reg timed1;
     reg [23:0] rgb1, rgb2;
     reg [1:0] vs_pipe, de_pipe;
     wire [15:0] glyph_row;
     subtitle_font_rom font(.clk(pixel_clk),
-        .address({runtime_text ? ram_glyph : default_glyph,row1}),.row(glyph_row));
+        .address({timed1 ? timed_glyph : runtime_text ? ram_glyph : default_glyph,row1}),.row(glyph_row));
     always @(posedge pixel_clk or posedge rst) begin
         if(rst) begin
             row1<=0; col1<=0; col2<=0; hit1<=0; hit2<=0;
             band1<=0; band2<=0; rgb1<=0; rgb2<=0;
+            timed1<=0;
             vs_pipe<=3; de_pipe<=0;
         end else begin
             row1<=pixel_y-TEXT_Y; col1<=source_x[3:0]; col2<=col1;
+            timed1<=timed_mode;
             hit1<=in_text; hit2<=hit1; band1<=in_band; band2<=band1;
             rgb1<=rgb_in; rgb2<=rgb1;
             vs_pipe<={vs_pipe[0],in_vs}; de_pipe<={de_pipe[0],in_de};

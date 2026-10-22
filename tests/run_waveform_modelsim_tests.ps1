@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $rtl = (Resolve-Path (Join-Path $PSScriptRoot '../src/user_source/hdl_source')).Path
 $simDir = Join-Path ([System.IO.Path]::GetTempPath()) ('codex_waveform_' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $simDir | Out-Null
-$benches = @('tb_audio_waveform', 'tb_waveform_axis', 'tb_subtitle_axis', 'tb_scrolling_subtitle')
+$benches = @('tb_audio4_subtitle', 'tb_audio_waveform', 'tb_waveform_axis', 'tb_subtitle_axis', 'tb_scrolling_subtitle')
 $sources = @(Get-ChildItem "$rtl/SD/*.v", "$rtl/audio/*.v", "$rtl/uart/*.v" | Where-Object Name -ne 'sdram.v' | ForEach-Object FullName)
 $sources += "$rtl/video_rgb_to_axis_640x480.v"
 $sources += @($benches | ForEach-Object { Join-Path $PSScriptRoot "$_.v" })

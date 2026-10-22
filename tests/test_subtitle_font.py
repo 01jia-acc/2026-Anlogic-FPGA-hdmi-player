@@ -1,5 +1,6 @@
 """Validate generated glyph orientation, Unicode IDs and boot paragraph contents."""
 import re
+import datetime
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,29 @@ FONT = ROOT / 'src/user_source/hdl_source/SD/subtitle_font.v'
 
 
 class SubtitleFontTests(unittest.TestCase):
+    def test_compiled_srt_uses_current_font_and_timestamps(self):
+        font = FONT.read_text(encoding='utf-8')
+        code_to_id = {i: i for i in range(32, 127)}
+        code_to_id.update({int(c, 16): int(i, 16) for c, i in
+                          re.findall(r"16'h([0-9a-f]+): glyph=8'h([0-9a-f]+)", font)})
+        rtl = (FONT.parent / 'audio4_subtitle_data.v').read_text(encoding='utf-8')
+        rom = {int(a): int(v, 16) for a, v in re.findall(r"text_rom\[(\d+)\]=8'h([0-9a-f]+)", rtl)}
+        cues = (ROOT / 'assets/AUDIO4.srt').read_text(encoding='utf-8-sig').strip().split('\n\n')
+        self.assertEqual(len(cues), 8)
+        offset = 0
+        for index, block in enumerate(cues):
+            lines = block.splitlines()
+            text = ''.join(lines[2:])
+            self.assertEqual([rom[offset+i] for i in range(len(text))], [code_to_id[ord(c)] for c in text])
+            self.assertIn(f"3'd{index}: base=8'd{offset};", rtl)
+            ticks = []
+            for timestamp in lines[1].split(' --> '):
+                t = datetime.datetime.strptime(timestamp, '%H:%M:%S,%f')
+                ticks.append(((t.hour*3600+t.minute*60+t.second)*1000000+t.microsecond)*48000//1000000)
+            self.assertIn(f"start_sample=22'd{ticks[0]}; end_sample=22'd{ticks[1]}; length=6'd{len(text)};", rtl)
+            offset += len(text)
+        self.assertEqual(offset, len((ROOT / 'assets/subtitle.txt').read_text(encoding='utf-8-sig').strip()))
+
     def test_checked_in_font_and_default_paragraph(self):
         source = FONT.read_text(encoding='utf-8')
         pixels = {int(a): int(v, 16) for a, v in re.findall(r"pixels\[(\d+)\]=16'h([0-9a-f]+)", source)}

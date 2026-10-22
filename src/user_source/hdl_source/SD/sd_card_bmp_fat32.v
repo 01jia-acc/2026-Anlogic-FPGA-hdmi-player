@@ -23,6 +23,7 @@ module sd_card_bmp_fat32 #(
     input wire [3:0] pcm_image_id_pix,
     input wire pcm_commit_toggle_pix,
     output wire pcm_commit_ack,
+    output wire [3:0] pcm_file_number_pix,
     output wire signed [15:0] pcm_sample,
     output wire pcm_valid, pcm_active, pcm_end, pcm_underflow,
     output wire [7:0] pcm_error,
@@ -430,6 +431,7 @@ module sd_card_bmp_fat32 #(
         .pixel_clk(pixel_clk), .pcm_ready(pcm_ready), .pcm_sample(pcm_sample),
         .pcm_image_id_pix(pcm_image_id_pix), .pcm_commit_toggle_pix(pcm_commit_toggle_pix),
         .pcm_commit_ack(pcm_commit_ack),
+        .pcm_file_number_pix(pcm_file_number_pix),
         .pcm_valid(pcm_valid), .pcm_active(pcm_active), .pcm_end(pcm_end),
         .pcm_underflow(pcm_underflow), .pcm_error(pcm_error),
         .pcm_play_enable(scan_completed && load_prepare == 0 && !image_read_needed &&

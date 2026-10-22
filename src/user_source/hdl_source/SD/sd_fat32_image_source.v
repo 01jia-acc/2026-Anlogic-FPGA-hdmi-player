@@ -55,6 +55,7 @@ module sd_fat32_image_source #(
     input wire [3:0] pcm_image_id_pix,
     input wire pcm_commit_toggle_pix,
     output reg pcm_commit_ack,
+    output wire [3:0] pcm_file_number_pix,
     input wire pcm_ready,
     output wire signed [15:0] pcm_sample,
     output wire pcm_valid,
@@ -232,6 +233,13 @@ module sd_fat32_image_source #(
     wire [7:0] audio_file_byte, audio_fs_error;
     reg audio_streamer_start;
     reg audio_running;
+    // Bundled file ID settles before the commit ACK permits PCM consumption.
+    reg [3:0] selected_file_number;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] file_number_meta, file_number_sync;
+    always @(posedge pixel_clk or posedge rst)
+        if(rst) begin file_number_meta<=0; file_number_sync<=0; end
+        else begin file_number_meta<=selected_file_number; file_number_sync<=file_number_meta; end
+    assign pcm_file_number_pix=file_number_sync;
     // PCM 使用独立文件流状态，BMP/PCM 在扇区边界交替，保留簇/偏移/FIFO。
     wire audio_channel_busy;
     reg audio_attempted, audio_start, audio_done, audio_abort;
@@ -683,6 +691,7 @@ module sd_fat32_image_source #(
             audio_wait_count <= 0; pcm_error <= 0; scan_usable <= 0;
             audio_commit_seen<=0; pcm_commit_ack<=0; audio_image_q<=0;
             audio_lookup_slot<=0; audio_lookup_index<=0; audio_switch_state<=0;
+            selected_file_number<=0;
             audio_clear<=0; audio_selected<=0; audio_cluster<=0; audio_size<=0;
         end else begin
             // ------------------------------------------------------------------
@@ -836,6 +845,8 @@ module sd_fat32_image_source #(
                     audio_switch_state<=5;
                 end
                 5: begin
+                    selected_file_number<=audio_selected && audio_size!=0 && !audio_size[0] ?
+                        audio_lookup_slot+4'd1 : 4'd0;
                     if(audio_selected && (audio_size==0 || audio_size[0])) begin
                         audio_selected<=0; pcm_error<=8'h71;
                     end

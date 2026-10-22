@@ -241,6 +241,8 @@ module tb_image_pcm;
             was_selected=bridge.pcm_selected; was_pcm=bridge.use_pcm;
             was_valid=valid;
             if(ready && valid) begin
+                if(dut.pcm_file_number_pix!==file_number(video_image))
+                    $fatal(1,"Committed PCM file number does not match sparse image mapping");
                 if(video_image==1 || video_image==3 || video_image==4)
                     $fatal(1,"Audio emitted for missing/invalid track");
                 if(sample!==pattern(file_number(video_image),received%samples(file_number(video_image))))

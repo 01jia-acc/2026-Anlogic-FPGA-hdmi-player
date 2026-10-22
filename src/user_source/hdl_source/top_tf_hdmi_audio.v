@@ -162,6 +162,9 @@ wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
 wire pcm_commit_ack;
+wire [3:0] pcm_file_number_pix;
+(* ASYNC_REG = "TRUE" *) reg [1:0] subtitle_pcm_mode_sync, subtitle_pcm_ack_sync;
+wire subtitle_file_selected;
 wire zoom_mode_sd;
 wire [1:0] zoom_level_sd, display_zoom_level;
 wire [31:0] thumbnail_sd, display_thumbnail, thumbnail_reader_descriptor;
@@ -341,6 +344,14 @@ always @(posedge clk) begin
 end
 
 assign rst_all = rst_all_reg;
+always @(posedge video_clk or posedge rst_all)
+    if(rst_all) begin subtitle_pcm_mode_sync<=0; subtitle_pcm_ack_sync<=0; end
+    else begin
+        subtitle_pcm_mode_sync<={subtitle_pcm_mode_sync[0],pcm_mode};
+        subtitle_pcm_ack_sync<={subtitle_pcm_ack_sync[0],pcm_commit_ack};
+    end
+assign subtitle_file_selected=video_display_valid && pcm_file_number_pix==4 &&
+    subtitle_pcm_ack_sync[1]==display_commit_toggle;
 
 // 图片选择在 SD 时钟域产生；只在下一次视频读帧请求到来时提交。
 // read_req 是保持到 ack 的电平，因此只取上升沿，防止一帧内重复改地址。
@@ -440,6 +451,7 @@ sd_card_bmp_fat32 #(
     .pcm_mode(pcm_mode),
     .pcm_image_id_pix(video_image_id), .pcm_commit_toggle_pix(display_commit_toggle),
     .pcm_commit_ack(pcm_commit_ack),
+    .pcm_file_number_pix(pcm_file_number_pix),
     .clk               (sd_card_clk),          // 输入：SD 卡/BMP 控制时钟
     .rst               (rst_all),              // 输入：统一高有效复位
     .key_next          (key1),                 // 输入：手动下一张按键
@@ -783,10 +795,13 @@ promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
 );
 // Waveform and text/font RAM reads each add TWO clocks to RGB and timing.
 // Scroll and text changes commit at the existing OSD VS frame boundary.
-scrolling_subtitle u_scrolling_subtitle (
+scrolling_subtitle #(.FILE_SUBTITLE_ENABLE(1)) u_scrolling_subtitle (
     .control_clk(clk), .pixel_clk(video_clk), .rst(rst_all),
     .rx_data(uart_rx_data), .rx_valid(uart_rx_valid),
     .frame_start(waveform_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
+    .file_selected(subtitle_file_selected), .file_show(subtitle_pcm_mode_sync[1]),
+    .file_commit_toggle(display_commit_toggle),
+    .file_sample_accept(pcm_stream_ready && pcm_stream_valid),
     .in_vs(waveform_vs), .in_de(waveform_de), .pixel_x(waveform_x), .pixel_y(waveform_y),
     .rgb_in(waveform_rgb), .out_vs(subtitle_vs), .out_de(subtitle_de),
     .rgb_out(subtitle_rgb), .busy(), .rejected_lines()
