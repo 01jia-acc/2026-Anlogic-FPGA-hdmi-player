@@ -5,12 +5,13 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
     reg clk=0, pix_clk=0, rst=1;
     always #5 clk=~clk;
     always #20 pix_clk=~pix_clk;
-    reg key_next=1, key_auto=1, key_audio=1, frame_req=0, write_toggle=0;
+    reg key_reset=1, key_next=1, key_auto=1, key_audio=1, frame_req=0, write_toggle=0;
     reg switch_pcm_n=1, switch_zoom_n=1;
     reg switch_volume_n=1;
     reg switch_brightness_n=1;
     wire brightness_mode;
     wire [4:0] brightness_level;
+    wire [5:0] contrast_level;
     wire volume_mode;
     wire [4:0] volume_level;
     reg scan_done=0, source_done=0;
@@ -37,6 +38,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
         .switch_volume_n(switch_volume_n), .volume_mode(volume_mode), .volume_level(volume_level),
         .switch_brightness_n(switch_brightness_n), .brightness_mode(brightness_mode), .brightness_level(brightness_level),
+        .key_contrast_up(key_reset), .contrast_level(contrast_level),
         .bmp_width(16'd640), .bmp_height(16'd480), .SD_MISO(1'b1),
         .display_valid(display_valid), .display_image_id(image_id),
         .display_ack_valid(ack_valid), .display_ack_bank(ack_bank), .display_ack_image_id(ack_id),
@@ -84,7 +86,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         reg [31:0] saved_descriptor;
         begin
             fill_window;
-            if(brightness_mode || brightness_level!=20 || volume_level!=15) $fatal(1,"Brightness startup");
+            if(brightness_mode || brightness_level!=20 || contrast_level!=20 || volume_level!=15) $fatal(1,"Image controls startup");
             repeat(5) begin
                 switch_brightness_n=0; repeat(10) @(negedge clk);
                 switch_brightness_n=1; repeat(10) @(negedge clk);
@@ -92,30 +94,37 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
             end
             switch_brightness_n=0; repeat(65) @(negedge clk);
             press(4,65); if(brightness_level!=19) $fatal(1,"Brightness down");
-            press(2,65); if(brightness_level!=20) $fatal(1,"Brightness up");
-            press(4,280); press(2,280);
-            if(brightness_level!=20 || image_id!=0 || dut.auto_play_en) $fatal(1,"Brightness long press isolation");
+            press(3,65); if(brightness_level!=20 || dut.thumbnail_pending) $fatal(1,"Brightness up / KEY3 isolation");
+            press(1,65); if(contrast_level!=21) $fatal(1,"Contrast up");
+            press(2,65); if(contrast_level!=20) $fatal(1,"Contrast down");
+            press(4,280); press(3,280); press(2,280); press(1,280);
+            if(brightness_level!=20 || contrast_level!=20 || image_id!=0 || dut.auto_play_en)
+                $fatal(1,"Adjustment long press isolation");
             for(n=0;n<25;n=n+1) press(4,65);
             if(brightness_level!=0) $fatal(1,"Brightness lower clamp");
-            for(n=0;n<25;n=n+1) press(2,65);
-            if(brightness_level!=20 || volume_level!=15 || image_id!=0 || dut.auto_play_en)
-                $fatal(1,"Brightness upper clamp / nav / volume isolation");
+            for(n=0;n<25;n=n+1) press(3,65);
+            if(brightness_level!=20) $fatal(1,"Brightness upper clamp");
+            for(n=0;n<45;n=n+1) press(2,65);
+            if(contrast_level!=0) $fatal(1,"Contrast lower clamp");
+            for(n=0;n<45;n=n+1) press(1,65);
+            if(contrast_level!=40 || volume_level!=15 || image_id!=0 || dut.auto_play_en)
+                $fatal(1,"Contrast upper clamp / nav / volume isolation");
             switch_volume_n=0; repeat(65) @(negedge clk);
             press(4,65);
-            if(volume_mode || !brightness_mode || brightness_level!=19 || volume_level!=15)
+            if(volume_mode || !brightness_mode || brightness_level!=19 || volume_level!=15 || contrast_level!=40)
                 $fatal(1,"SW1 must override SW2");
             // Hold through brightness -> volume: release must affect neither.
             key_next=0; key_auto=0; repeat(65) @(negedge clk);
             switch_brightness_n=1; repeat(65) @(negedge clk);
             key_next=1; key_auto=1; repeat(65) @(negedge clk);
-            if(!volume_mode || brightness_level!=19 || volume_level!=15 || image_id!=0)
+            if(!volume_mode || brightness_level!=19 || contrast_level!=40 || volume_level!=15 || image_id!=0)
                 $fatal(1,"Brightness to volume held cancellation");
             press(4,65); if(volume_level!=14 || brightness_level!=19) $fatal(1,"Restore volume keys");
             // Hold through volume -> brightness and confirm source independence.
             key_next=0; key_auto=0; repeat(65) @(negedge clk);
             switch_brightness_n=0; switch_pcm_n=0; repeat(65) @(negedge clk);
             key_next=1; key_auto=1; repeat(65) @(negedge clk);
-            if(volume_level!=14 || brightness_level!=19 || !pcm_mode) $fatal(1,"Volume to brightness / SW3");
+            if(volume_level!=14 || brightness_level!=19 || contrast_level!=40 || !pcm_mode) $fatal(1,"Volume to brightness / SW3");
             switch_volume_n=1;
             // Hold through brightness -> navigation then navigation -> brightness.
             key_next=0; key_auto=0; repeat(65) @(negedge clk);
@@ -125,13 +134,26 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
             key_next=0; key_auto=0; repeat(65) @(negedge clk);
             switch_brightness_n=0; repeat(65) @(negedge clk);
             key_next=1; key_auto=1; repeat(65) @(negedge clk);
-            if(brightness_level!=19 || image_id!=0 || dut.auto_play_en) $fatal(1,"Brightness entry held navigation");
+            if(brightness_level!=19 || contrast_level!=40 || image_id!=0 || dut.auto_play_en)
+                $fatal(1,"Brightness entry held navigation");
             switch_zoom_n=0; repeat(65) @(negedge clk);
             press(4,65);
             if(brightness_level!=18 || zoom_level!=1) $fatal(1,"Brightness zoom priority");
+            press(3,65); frame;
+            if(descriptor[23] || dut.thumbnail_pending || brightness_level!=19)
+                $fatal(1,"KEY3 must brighten without opening preview in SW1 mode");
+            key_audio=0; repeat(65) @(negedge clk);
+            switch_brightness_n=1; repeat(65) @(negedge clk);
+            key_audio=1; repeat(65) @(negedge clk); frame;
+            if(descriptor[23] || dut.thumbnail_pending || brightness_level!=19)
+                $fatal(1,"Held KEY3 release must not open preview or adjust brightness");
             press(3,65); frame; saved_descriptor=descriptor;
-            press(2,65); press(4,65);
-            if(brightness_level!=18 || descriptor!=saved_descriptor) $fatal(1,"Brightness preview priority");
+            if(!descriptor[23]) $fatal(1,"Preview not restored when SW1 OFF");
+            switch_brightness_n=0; repeat(65) @(negedge clk);
+            press(2,65); press(4,65); press(3,65);
+            if(brightness_level!=19 || contrast_level!=39 || descriptor!=saved_descriptor)
+                $fatal(1,"Adjustment preview priority bri=%0d con=%0d descriptor=%h expected=%h",
+                    brightness_level,contrast_level,descriptor,saved_descriptor);
             switch_brightness_n=1; repeat(65) @(negedge clk);press(2,65);
             if(descriptor[21:20]==saved_descriptor[21:20]) $fatal(1,"Preview navigation not restored");
             switch_zoom_n=1; repeat(65) @(negedge clk);frame;
@@ -139,13 +161,13 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
             switch_brightness_n=0; repeat(4000) @(negedge clk);
             if(image_id!=0 || !dut.auto_play_en || dut.auto_cnt!=0) $fatal(1,"Brightness auto pause");
             switch_brightness_n=1; repeat(100) @(negedge clk);
-            if(dut.auto_cnt==0 || brightness_level!=18) $fatal(1,"Brightness retention/auto resume");
+            if(dut.auto_cnt==0 || brightness_level!=19 || contrast_level!=39) $fatal(1,"Adjustment retention/auto resume");
             press(4,65);press(2,65);frame;
-            if(image_id!=1 || brightness_level!=18) $fatal(1,"Picture change brightness retention");
+            if(image_id!=1 || brightness_level!=19 || contrast_level!=39) $fatal(1,"Picture change adjustment retention");
             switch_brightness_n=0;switch_volume_n=0;boot;
-            if(!brightness_mode || volume_mode || brightness_level!=20 || volume_level!=15)
+            if(!brightness_mode || volume_mode || brightness_level!=20 || contrast_level!=20 || volume_level!=15)
                 $fatal(1,"SW1 ON reset/defaults/priority");
-            $display("PASS: SW1 debounce, brightness steps/clamps/reset, SW1/SW2 priority, held gesture cancellation, audio independence, zoom/preview routing, slideshow pause/resume, picture retention");
+            $display("PASS: SW1 brightness/contrast keys, 5%% steps/clamps/reset, priority, held gesture cancellation, KEY3 isolation, preview routing, slideshow pause/resume, picture retention");
         end
     endtask
     task volume_scenarios;
@@ -275,9 +297,9 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         input integer button, duration;
         begin
             @(negedge clk);
-            case(button) 2:key_next=0; 3:key_audio=0; 4:key_auto=0; endcase
+            case(button) 1:key_reset=0; 2:key_next=0; 3:key_audio=0; 4:key_auto=0; endcase
             repeat(duration) @(negedge clk);
-            key_next=1; key_audio=1; key_auto=1;
+            key_reset=1; key_next=1; key_audio=1; key_auto=1;
             repeat(65) @(negedge clk);
         end
     endtask
@@ -297,7 +319,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
     endtask
     task boot;
         begin
-            rst=1; key_next=1; key_auto=1; key_audio=1; write_toggle=0;
+            rst=1; key_reset=1; key_next=1; key_auto=1; key_audio=1; write_toggle=0;
             repeat(12) @(negedge clk); rst=0; loads=0;
             wait(dut.scan_start_pulse); repeat(4) @(negedge clk);
             scan_done=1; @(negedge clk); scan_done=0;

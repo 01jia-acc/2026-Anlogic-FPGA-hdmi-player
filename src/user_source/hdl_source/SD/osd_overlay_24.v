@@ -154,36 +154,41 @@ endmodule
 module volume_status_osd #(
     parameter integer OSD_X=288,
     parameter [23:0] LABEL="VOL",
-    parameter [4:0] DEFAULT_LEVEL=5'd15
+    parameter integer LEVEL_BITS=5,
+    parameter [LEVEL_BITS-1:0] DEFAULT_LEVEL=15
 ) (
     input wire clk, rst_n, frame_start, de,
     input wire [11:0] pixel_x, pixel_y,
-    input wire [4:0] level,
+    input wire [LEVEL_BITS-1:0] level,
     input wire adjust_mode,
     input wire [23:0] rgb_in,
     output wire [23:0] rgb_out
 );
-    reg [4:0] level_q;
+    reg [LEVEL_BITS-1:0] level_q;
     reg mode_q;
     always @(posedge clk or negedge rst_n)
         if(!rst_n) begin level_q<=DEFAULT_LEVEL; mode_q<=0; end
         else if(frame_start) begin level_q<=level; mode_q<=adjust_mode; end
     // 5% steps: decimal tens = level/2, units = odd ? 5 : 0.
     wire [11:0] dx=pixel_x-OSD_X, dy=pixel_y-8;
+    wire [5:0] tens=level_q >> 1;
+    wire [5:0] tens_digit=tens-(level_q>=40 ? 6'd20 : level_q>=20 ? 6'd10 : 6'd0);
     reg [7:0] ch;
     reg [34:0] glyph;
     reg [4:0] row;
     always @* begin
         case(dx[5:3])
             0:ch=LABEL[23:16]; 1:ch=LABEL[15:8]; 2:ch=LABEL[7:0];
-            4:ch=level_q==20 ? "1" : " ";
-            5:ch=level_q==20 ? "0" : (level_q<2 ? " " : (8'd48+{4'd0,level_q[4:1]}));
+            4:ch=level_q>=40 ? "2" : level_q>=20 ? "1" : " ";
+            5:ch=level_q<2 ? " " : 8'd48+tens_digit;
             6:ch=level_q[0] ? "5" : "0";
             7:ch="%";
             default:ch=" ";
         endcase
         case(ch)
             "B":glyph={5'b11110,5'b10001,5'b10001,5'b11110,5'b10001,5'b10001,5'b11110};
+            "C":glyph={5'b01111,5'b10000,5'b10000,5'b10000,5'b10000,5'b10000,5'b01111};
+            "N":glyph={5'b10001,5'b11001,5'b10101,5'b10011,5'b10001,5'b10001,5'b10001};
             "R":glyph={5'b11110,5'b10001,5'b10001,5'b11110,5'b10100,5'b10010,5'b10001};
             "I":glyph={5'b11111,5'b00100,5'b00100,5'b00100,5'b00100,5'b00100,5'b11111};
             "V":glyph={5'b10001,5'b10001,5'b10001,5'b10001,5'b10001,5'b01010,5'b00100};

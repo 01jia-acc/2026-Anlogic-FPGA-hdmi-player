@@ -37,6 +37,8 @@ module sd_card_bmp_fat32 #(
     input wire switch_brightness_n, // SW1: ON=brightness keys (priority over SW2)
     output wire brightness_mode,
     output wire [4:0] brightness_level, // 0..20, reset=20 (original RGB)
+    input wire key_contrast_up, // physical KEY1, reset when SW1 is OFF
+    output wire [5:0] contrast_level, // 0..40, 5% steps, reset=20 (100%)
     output reg zoom_mode,
     output reg [1:0] zoom_level, // 0=0.5x, 1=1x, 2=1.5x, 3=2x
     // [23]=menu, [22]=transaction epoch, [21:20]=focus bank,
@@ -216,6 +218,8 @@ module sd_card_bmp_fat32 #(
     reg [7:0] last_error;
     wire key_next_press, key_next_stable, key_auto_press, key_auto_stable, key_audio_mode_press;
     wire key_audio_stable;
+    wire key_contrast_press, key_contrast_stable;
+    reg brightness_mode_q, audio_blocked;
     wire switch_pcm_stable, switch_zoom_stable;
     reg audio_down_seen, audio_long_marked, zoom_auto_down;
     reg [31:0] audio_hold_count;
@@ -372,6 +376,14 @@ module sd_card_bmp_fat32 #(
     key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_key_audio_mode (
         .clk(clk),.rst(rst),.button_in(key_audio_mode),.press_pulse(key_audio_mode_press),
         .button_stable_out(key_audio_stable));
+    generate if(BRIGHTNESS_CONTROL_ENABLE) begin : g_contrast_key
+        key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_key_contrast (
+            .clk(clk),.rst(rst),.button_in(key_contrast_up),.press_pulse(key_contrast_press),
+            .button_stable_out(key_contrast_stable));
+    end else begin : g_no_contrast_key
+        assign key_contrast_press=1'b0;
+        assign key_contrast_stable=1'b1;
+    end endgenerate
     generate if(SWITCH_MODE_ENABLE) begin : g_mode_switches
         key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) pcm_switch (
             .clk(clk), .rst(rst), .button_in(switch_pcm_n),
@@ -399,8 +411,8 @@ module sd_card_bmp_fat32 #(
     end else begin : g_no_brightness_switch
         assign brightness_switch_stable=1'b1;
     end endgenerate
-    wire volume_navigation_enabled, brightness_navigation_enabled;
-    wire navigation_keys_enabled=volume_navigation_enabled && brightness_navigation_enabled;
+    wire volume_navigation_enabled, brightness_navigation_enabled, contrast_navigation_enabled;
+    wire navigation_keys_enabled=volume_navigation_enabled && brightness_navigation_enabled && contrast_navigation_enabled;
     volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES)) u_volume_keys (
         .clk(clk), .rst(rst), .mode(volume_mode),
         .up_press(key_next_press), .down_press(key_auto_press),
@@ -408,9 +420,15 @@ module sd_card_bmp_fat32 #(
         .navigation_enabled(volume_navigation_enabled), .level(volume_level));
     volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES), .DEFAULT_LEVEL(20)) u_brightness_keys (
         .clk(clk), .rst(rst), .mode(brightness_mode),
-        .up_press(key_next_press), .down_press(key_auto_press),
-        .up_released(key_next_stable), .down_released(key_auto_stable),
+        .up_press(key_audio_mode_press), .down_press(key_auto_press),
+        .up_released(key_audio_stable), .down_released(key_auto_stable),
         .navigation_enabled(brightness_navigation_enabled), .level(brightness_level));
+    volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES),
+        .LEVEL_BITS(6), .MAX_LEVEL(40), .DEFAULT_LEVEL(20)) u_contrast_keys (
+        .clk(clk), .rst(rst), .mode(brightness_mode),
+        .up_press(key_contrast_press), .down_press(key_next_press),
+        .up_released(key_contrast_stable), .down_released(key_next_stable),
+        .navigation_enabled(contrast_navigation_enabled), .level(contrast_level));
     assign brightness_mode=!brightness_switch_stable;
     assign volume_mode=!volume_switch_stable && !brightness_mode;
     always @(posedge clk or posedge rst) begin
@@ -418,6 +436,7 @@ module sd_card_bmp_fat32 #(
             pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0;
             zoom_mode<=0; zoom_level<=1; zoom_image_id<=0;
             audio_down_seen<=0; audio_long_marked<=0; audio_hold_count<=0;
+            brightness_mode_q<=0; audio_blocked<=1;
             zoom_auto_down<=0;
             thumbnail_mode<=0; thumbnail_epoch<=0; thumbnail_focus<=0;
             thumbnail_ack1<=0; thumbnail_ack2<=0;
@@ -438,6 +457,12 @@ module sd_card_bmp_fat32 #(
             end
             // Defer short KEY3 action until release: a long press must not
             // switch the audio source on its way into/out of zoom mode.
+            brightness_mode_q<=brightness_mode;
+            if(brightness_mode!=brightness_mode_q) audio_blocked<=1;
+            else if(key_audio_stable) audio_blocked<=0;
+            if(brightness_mode || brightness_mode!=brightness_mode_q || audio_blocked) begin
+                audio_down_seen<=0; audio_hold_count<=0; audio_long_marked<=0;
+            end else begin
             if(key_audio_mode_press) audio_down_seen<=1;
             if(!key_audio_stable) begin
                 if(audio_hold_count<LONG_PRESS_CYCLES-1) audio_hold_count<=audio_hold_count+1'b1;
@@ -473,6 +498,7 @@ module sd_card_bmp_fat32 #(
                         end else if(PCM_ENABLE && !SWITCH_MODE_ENABLE) pcm_mode<=~pcm_mode;
                     end
                 end
+            end
             end
             if(!navigation_keys_enabled) next_down_seen<=0;
             else if(key_next_press) next_down_seen<=1;
@@ -732,15 +758,17 @@ module sd_card_bmp_fat32 #(
 endmodule
 
 // Debounced key ownership. A switch transition cancels held gestures in both
-// directions. Shared 0..20 level controller for volume/brightness; no auto-repeat.
+// directions. Shared level controller for volume, brightness and contrast.
 module volume_key_control #(
     parameter integer LONG_PRESS_CYCLES=100000000,
-    parameter [4:0] DEFAULT_LEVEL=5'd15
+    parameter integer LEVEL_BITS=5,
+    parameter integer MAX_LEVEL=20,
+    parameter [LEVEL_BITS-1:0] DEFAULT_LEVEL=15
 ) (
     input wire clk, rst, mode,
     input wire up_press, down_press, up_released, down_released,
     output wire navigation_enabled,
-    output reg [4:0] level
+    output reg [LEVEL_BITS-1:0] level
 );
     localparam integer COUNT_W=LONG_PRESS_CYCLES>1 ? $clog2(LONG_PRESS_CYCLES+1) : 1;
     reg mode_q, blocked, up_seen, down_seen;
@@ -768,7 +796,7 @@ module volume_key_control #(
                     down_count<=down_count+1'b1;
                 if(up_released) up_seen<=0;
                 if(down_released) down_seen<=0;
-                if(up_short && !down_short && level<20) level<=level+1'b1;
+                if(up_short && !down_short && level<MAX_LEVEL) level<=level+1'b1;
                 else if(down_short && !up_short && level>0) level<=level-1'b1;
             end
         end
