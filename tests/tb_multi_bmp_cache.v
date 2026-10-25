@@ -17,6 +17,7 @@ module tb_multi_bmp_cache #(
     integer loads=0, i, saved_loads, old_id, bank, boot_count;
     reg saved_toggle;
     reg [63:0] test_pipeline;
+    reg test_pixel_progress=0;
     sd_card_bmp_fat32 #(.CLK_FREQ_HZ(1000), .LONG_PRESS_MS(200),
         .LOAD_TIMEOUT_MS(WIPE_FRAMES > 1 ? 20000 : 2000), .PCM_ENABLE(1)) dut (
         .clk(clk), .rst(rst), .pixel_clk(pixel_clk), .pcm_ready(1'b0),
@@ -263,6 +264,24 @@ module tb_multi_bmp_cache #(
         @(negedge clk);
         test_pipeline=64'h89ab032101234567;
         force dut.source_debug_load_pipeline=test_pipeline;
+        // A large image can take several timeout windows in total while
+        // bytes keep arriving. It must not be mistaken for a stalled card.
+        for(i=0;i<dut.LOAD_TIMEOUT_CYCLES*3;i=i+1) begin
+            @(negedge clk); test_pipeline[0]=~test_pipeline[0];
+            if(!dut.load_busy || dut.preload_halted || dut.pipeline_frozen)
+                $fatal(1,"Healthy long image timed out while bytes advanced");
+        end
+        // Upscaling may stop consuming input while emitting output rows.
+        // Pixel progress must keep the watchdog alive in that phase too.
+        force dut.write_en=test_pixel_progress;
+        for(i=0;i<dut.LOAD_TIMEOUT_CYCLES*3;i=i+1) begin
+            @(negedge clk); test_pixel_progress=(i%8)==0;
+            if(!dut.load_busy || dut.preload_halted || dut.pipeline_frozen)
+                $fatal(1,"Healthy interpolation timed out while pixels advanced");
+        end
+        test_pixel_progress=0;
+        release dut.write_en;
+        test_pipeline=64'h89ab032101234567;
         // File done but SDRAM completion missing: retain this distinction.
         source_done=1;
         @(negedge clk); source_done=0;

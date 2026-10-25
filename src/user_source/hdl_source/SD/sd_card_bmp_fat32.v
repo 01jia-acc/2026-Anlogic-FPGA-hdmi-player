@@ -11,7 +11,7 @@ module sd_card_bmp_fat32 #(
     parameter [2:0]   SCAN_TARGET_COUNT = 3'd4,
     // 自动键按住超过该毫秒数判为"长按"（长按触发"上一张"）。
     parameter integer LONG_PRESS_MS     = 1000,
-    // 一次加载的最长允许时间；超过则发 load_abort 并报错（防坏卡永久卡死）。
+    // 连续无图像加载进展的最长时间；正常大图允许加载超过此时长。
     parameter integer LOAD_TIMEOUT_MS   = 5_000,
     parameter integer PCM_ENABLE = 0,
     parameter integer THUMBNAIL_ENABLE = 0,
@@ -161,14 +161,26 @@ module sd_card_bmp_fat32 #(
     reg [31:0] auto_cnt, long_press_cnt, load_timeout_cnt;
     reg key_auto_down_seen, long_press_marked, next_down_seen, next_release_pulse;
     reg load_busy, source_done_seen, write_done_seen;
+    wire write_finish_pulse;
     reg [1:0] load_prepare;
     localparam integer LOAD_TIMEOUT_CYCLES = (CLK_FREQ_HZ / 1000) * LOAD_TIMEOUT_MS;
+    // The decode offset advances one byte per SD-domain clock at most, so
+    // tracking its LSB detects every advance using only one extra register.
+    // Do not count unrelated PCM traffic as image progress.
+    reg decode_offset_lsb_seen;
+    always @(posedge clk or posedge rst) begin
+        if(rst) decode_offset_lsb_seen<=0;
+        else decode_offset_lsb_seen<=source_debug_load_pipeline[0];
+    end
+    wire load_progress = source_debug_load_pipeline[0]!=decode_offset_lsb_seen ||
+        write_en || (source_load_done && !source_done_seen) || write_finish_pulse;
     wire [63:0] live_load_pipeline = {source_debug_load_pipeline[63:48],
         source_done_seen, write_done_seen, load_prepare, load_busy,
         source_debug_load_pipeline[42:0]};
     assign debug_load_pipeline = pipeline_frozen ? aborted_load_pipeline : live_load_pipeline;
     wire pipeline_timeout = load_busy && load_prepare==0 &&
-        !(source_load_done && source_load_error!=0) && load_timeout_cnt>=LOAD_TIMEOUT_CYCLES;
+        !load_progress && !(source_load_done && source_load_error!=0) &&
+        load_timeout_cnt>=LOAD_TIMEOUT_CYCLES;
     // Capture at the timeout decision, before the scheduler clears its flags
     // and before the registered abort pulse resets the source on the next edge.
     always @(posedge clk or posedge rst) begin
@@ -265,7 +277,7 @@ module sd_card_bmp_fat32 #(
         ((SWITCH_MODE_ENABLE && switch_zoom_stable) ||
          (key_audio_stable && audio_down_seen && !audio_long_marked) ||
          (!key_audio_stable && audio_hold_count>=LONG_PRESS_CYCLES-1 && !audio_long_marked));
-    wire write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
+    assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
     // 双向邮箱确认像素域已切到所请求的帧之后，才允许复用旧显示bank。
     wire display_settled = display_ack_valid && display_ack_bank == disp_buf_idx &&
                            display_ack_image_id == img_idx;
@@ -591,11 +603,12 @@ module sd_card_bmp_fat32 #(
                     end else if(source_load_done && source_load_error != 0) begin
                         load_busy<=0; preload_halted<=1; last_error<=source_load_error;
                         source_done_seen<=0; write_done_seen<=0;
-                    end else if(load_timeout_cnt >= LOAD_TIMEOUT_CYCLES) begin
+                    end else if(pipeline_timeout) begin
                         load_abort_pulse<=1; load_busy<=0; preload_halted<=1; last_error<=8'he0;
                         source_done_seen<=0; write_done_seen<=0;
                     end else begin
-                        load_timeout_cnt<=load_timeout_cnt+1'b1;
+                        if(load_progress) load_timeout_cnt<=0;
+                        else load_timeout_cnt<=load_timeout_cnt+1'b1;
                         if(source_load_done) source_done_seen<=1;
                         if(write_finish_pulse) write_done_seen<=1;
                         if((source_done_seen || source_load_done) &&

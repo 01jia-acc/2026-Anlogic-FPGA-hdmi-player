@@ -212,6 +212,9 @@ module tb_bilinear_image #(
         reuse_session=0;
         if(FULL_SIZE) begin
             good_image(320,240,0);good_image(800,600,0);good_image(1920,1080,0);
+            // Actual TF-card dimensions used to validate load-time resizing.
+            good_image(720,582,0);good_image(1600,1066,0);
+            good_image(1080,720,0);good_image(576,577,0);good_image(535,300,0);
         end
         bad_image(7,5,1,8'h37);bad_image(1921,1,0,8'h32);
         short_directory_size;
