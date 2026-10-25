@@ -13,7 +13,7 @@ foreach source {audio/pcm_stream_buffer.v audio/pcm_test_tone.v audio/pcm_media_
     }
 }
 cd [file join $repo_root src td_project]
-foreach source {SD/scrolling_subtitle.v SD/subtitle_font.v SD/audio4_subtitle_data.v SD/audio4_subtitle_timeline.v} {
+foreach source {SD/scrolling_subtitle.v SD/subtitle_font.v SD/audio4_subtitle_data.v SD/audio4_subtitle_timeline.v SD/video_brightness.v} {
     if {[string first "$source" $project_text] < 0} {
         error "Missing subtitle integration source in project: $source. Reload the updated .al in TD."
     }

@@ -16,7 +16,8 @@ module sd_card_bmp_fat32 #(
     parameter integer PCM_ENABLE = 0,
     parameter integer THUMBNAIL_ENABLE = 0,
     parameter integer SWITCH_MODE_ENABLE = 0,
-    parameter integer VOLUME_CONTROL_ENABLE = 0
+    parameter integer VOLUME_CONTROL_ENABLE = 0,
+    parameter integer BRIGHTNESS_CONTROL_ENABLE = 0
 ) (
     // ===================== 端口：系统时钟/复位 =====================
     input  wire        clk,            // 系统时钟 100MHz（顶层接 sd_card_clk）
@@ -33,6 +34,9 @@ module sd_card_bmp_fat32 #(
     input wire switch_volume_n, // SW2: ON=volume keys
     output wire volume_mode,
     output wire [4:0] volume_level, // 0..20, 5% per step, reset=15 (75%)
+    input wire switch_brightness_n, // SW1: ON=brightness keys (priority over SW2)
+    output wire brightness_mode,
+    output wire [4:0] brightness_level, // 0..20, reset=20 (original RGB)
     output reg zoom_mode,
     output reg [1:0] zoom_level, // 0=0.5x, 1=1x, 2=1.5x, 3=2x
     // [23]=menu, [22]=transaction epoch, [21:20]=focus bank,
@@ -387,13 +391,28 @@ module sd_card_bmp_fat32 #(
     end else begin : g_no_volume_switch
         assign volume_switch_stable=1'b1;
     end endgenerate
-    wire navigation_keys_enabled;
+    wire brightness_switch_stable;
+    generate if(BRIGHTNESS_CONTROL_ENABLE) begin : g_brightness_switch
+        key_press_debounce_fat32 #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) brightness_switch (
+            .clk(clk), .rst(rst), .button_in(switch_brightness_n),
+            .press_pulse(), .button_stable_out(brightness_switch_stable));
+    end else begin : g_no_brightness_switch
+        assign brightness_switch_stable=1'b1;
+    end endgenerate
+    wire volume_navigation_enabled, brightness_navigation_enabled;
+    wire navigation_keys_enabled=volume_navigation_enabled && brightness_navigation_enabled;
     volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES)) u_volume_keys (
-        .clk(clk), .rst(rst), .mode(!volume_switch_stable),
+        .clk(clk), .rst(rst), .mode(volume_mode),
         .up_press(key_next_press), .down_press(key_auto_press),
         .up_released(key_next_stable), .down_released(key_auto_stable),
-        .navigation_enabled(navigation_keys_enabled), .level(volume_level));
-    assign volume_mode=!volume_switch_stable;
+        .navigation_enabled(volume_navigation_enabled), .level(volume_level));
+    volume_key_control #(.LONG_PRESS_CYCLES(LONG_PRESS_CYCLES), .DEFAULT_LEVEL(20)) u_brightness_keys (
+        .clk(clk), .rst(rst), .mode(brightness_mode),
+        .up_press(key_next_press), .down_press(key_auto_press),
+        .up_released(key_next_stable), .down_released(key_auto_stable),
+        .navigation_enabled(brightness_navigation_enabled), .level(brightness_level));
+    assign brightness_mode=!brightness_switch_stable;
+    assign volume_mode=!volume_switch_stable && !brightness_mode;
     always @(posedge clk or posedge rst) begin
         if(rst) begin
             pcm_mode<=0; next_down_seen<=0; next_release_pulse<=0;
@@ -646,7 +665,7 @@ module sd_card_bmp_fat32 #(
                             key_auto_down_seen<=0;
                         end
                     end
-                    if(auto_play_en && !volume_mode && !zoom_mode && display_valid && display_settled &&
+                    if(auto_play_en && !volume_mode && !brightness_mode && !zoom_mode && display_valid && display_settled &&
                        (!load_busy || load_is_prefetch) &&
                        !next_req_pending && !prev_req_pending && preload_next_idx>=preload_limit &&
                        img_found_count>1) begin
@@ -713,8 +732,11 @@ module sd_card_bmp_fat32 #(
 endmodule
 
 // Debounced key ownership. A switch transition cancels held gestures in both
-// directions. Only a fresh short press/release changes volume; no auto-repeat.
-module volume_key_control #(parameter integer LONG_PRESS_CYCLES=100000000) (
+// directions. Shared 0..20 level controller for volume/brightness; no auto-repeat.
+module volume_key_control #(
+    parameter integer LONG_PRESS_CYCLES=100000000,
+    parameter [4:0] DEFAULT_LEVEL=5'd15
+) (
     input wire clk, rst, mode,
     input wire up_press, down_press, up_released, down_released,
     output wire navigation_enabled,
@@ -729,7 +751,7 @@ module volume_key_control #(parameter integer LONG_PRESS_CYCLES=100000000) (
     assign navigation_enabled=!mode && !changed && !blocked;
     always @(posedge clk or posedge rst) begin
         if(rst) begin
-            level<=15; mode_q<=0; blocked<=1;
+            level<=DEFAULT_LEVEL; mode_q<=0; blocked<=1;
             up_seen<=0; down_seen<=0; up_count<=0; down_count<=0;
         end else begin
             mode_q<=mode;

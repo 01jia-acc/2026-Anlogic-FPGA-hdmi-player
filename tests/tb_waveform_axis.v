@@ -1,11 +1,36 @@
 `timescale 1ns/1ps
 // Real post-gain HDMI samples -> waveform -> subtitle -> AXIS at 640x480.
-module tb_waveform_axis;
+module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
     reg clk=0,rst=1;
     always #20 clk=~clk;
     reg vs=1,de=0,enable=1;
     reg [11:0] x=0,y=0;
     reg [23:0] rgb=0;
+    reg control_clk=0;
+    always #7 control_clk=~control_clk;
+    reg [4:0] requested_brightness=20;
+    integer expected_brightness=20;
+    wire [23:0] picture_rgb;
+    generate if(BRIGHTNESS_TEST) begin : g_brightness
+        wire ready;
+        wire [95:0] snapshot;
+        wire [4:0] level=snapshot[50] ? snapshot[55:51] : 5'd20;
+        wire [23:0] adjusted_rgb;
+        reg prev_vs=1;
+        always @(posedge clk) if(rst) prev_vs<=1; else prev_vs<=vs;
+        wire frame_start=prev_vs && !vs;
+        subtitle_frame_commit mailbox(
+            .src_clk(control_clk),.src_rst_n(!rst),.src_commit(ready),.src_ready(ready),
+            .src_text({39'd0,1'b1,requested_brightness,1'b1,50'd0}),.src_length(6'd0),.src_enable(1'b1),
+            .dst_clk(clk),.dst_rst_n(!rst),.frame_start(!de),.dst_text(snapshot),.dst_length(),.dst_enable());
+        video_brightness brightness(.clk(clk),.rst_n(!rst),.frame_start(frame_start),
+            .level(level),.fade_alpha(8'd255),.rgb_in(rgb),.rgb_out(adjusted_rgb));
+        volume_status_osd #(.OSD_X(200),.LABEL("BRI"),.DEFAULT_LEVEL(20)) osd(
+            .clk(clk),.rst_n(!rst),.frame_start(frame_start),.de(de),.pixel_x(x),.pixel_y(y),
+            .level(level),.adjust_mode(snapshot[56]),.rgb_in(adjusted_rgb),.rgb_out(picture_rgb));
+    end else begin : g_original
+        assign picture_rgb=rgb;
+    end endgenerate
     reg pcm_mode=1,pcm_valid=1;
     // Quiet PCM: 2560 becomes 1920 after the real 192/256 HDMI gain.
     // Raised thresholds must show two blocks instead of the previous three.
@@ -22,7 +47,7 @@ module tb_waveform_axis;
     wire [11:0] wx,wy;
     wire [23:0] wrgb,srgb,data;
     promax_audio_waveform #(.WAVE_Y(368)) wave(
-        .clk(clk),.rst_n(!rst),.vsync(vs),.de(de),.rgb_in(rgb),
+        .clk(clk),.rst_n(!rst),.vsync(vs),.de(de),.rgb_in(picture_rgb),
         .pixel_x(x),.pixel_y(y),.enable(enable),.pcm_tap_valid(av),.pcm_tap_left(left[23:8]),
         .rgb_out(wrgb),.out_vs(wvs),.out_de(wde),.out_x(wx),.out_y(wy),
         .frame_start_out(wframe),.waveform_active());
@@ -40,6 +65,25 @@ module tb_waveform_axis;
     integer history[0:31];
     integer h,column_blocks;
     reg [23:0] golden;
+    integer brightness_gain,brightness_alpha,rr,gg,bb,osd_col;
+    reg [7:0] osd_char;
+    reg [34:0] osd_glyph;
+    reg [4:0] osd_row;
+    function [34:0] reference_glyph;
+        input [7:0] ch;
+        begin
+            case(ch)
+                "B":reference_glyph=35'b11110_10001_10001_11110_10001_10001_11110;
+                "R":reference_glyph=35'b11110_10001_10001_11110_10100_10010_10001;
+                "I":reference_glyph=35'b11111_00100_00100_00100_00100_00100_11111;
+                "0":reference_glyph=35'b01110_10001_10001_10001_10001_10001_01110;
+                "1":reference_glyph=35'b00100_01100_00100_00100_00100_00100_01110;
+                "5":reference_glyph=35'b11111_10000_10000_11110_00001_00001_11110;
+                "%":reference_glyph=35'b11001_11010_00010_00100_01000_01011_10011;
+                default:reference_glyph=0;
+            endcase
+        end
+    endfunction
     always @(posedge clk) begin
         if(rst) begin
             vp=0;lp=0;up=0;arm=1;prev_vs=vs;
@@ -53,6 +97,26 @@ module tb_waveform_axis;
             end
             prev_vs=vs;
             golden=rgb;
+            if(BRIGHTNESS_TEST) begin
+                brightness_gain=(expected_brightness*256+10)/20;
+                brightness_alpha=(255*brightness_gain+128)/256;
+                rr=(rgb[23:16]*brightness_alpha+255)/256;
+                gg=(rgb[15:8]*brightness_alpha+255)/256;
+                bb=(rgb[7:0]*brightness_alpha+255)/256;
+                golden={rr[7:0],gg[7:0],bb[7:0]};
+                if(de && x>=200 && x<264 && y>=8 && y<15) begin
+                    osd_col=(x-200)/8;
+                    case(osd_col)
+                        0:osd_char="B"; 1:osd_char="R"; 2:osd_char="I";
+                        4:osd_char=expected_brightness==20 ? "1" : " ";
+                        5:osd_char=expected_brightness==20 ? "0" : (expected_brightness==10 ? "5" : " ");
+                        6:osd_char="0"; 7:osd_char="%"; default:osd_char=" ";
+                    endcase
+                    osd_glyph=reference_glyph(osd_char);
+                    osd_row=osd_glyph >> ((14-y)*5);
+                    if((x-200)%8<5 && osd_row[4-(x-200)%8]) golden=24'hffff00;
+                end
+            end
             column_blocks=(x>=64 && x<576) ? history[(x-64)/16] : 1;
             if(enable && de && x>=64 && x<576 && y>=432-column_blocks*8 && y<432 &&
                 (x-64)%16>=2 && (x-64)%16<14 && (431-y)%8<4)
@@ -79,6 +143,7 @@ module tb_waveform_axis;
         vs=0;repeat(5) @(negedge clk);vs=1;
         repeat(420000) @(negedge clk);
         for(f=0;f<3;f=f+1) begin
+            if(BRIGHTNESS_TEST) expected_brightness=f==0 ? 20 : (f==1 ? 0 : 10);
             @(negedge clk);vs=0;enable=(f!=1);
             if(f==2) blocks=1;
             repeat(5) @(negedge clk);vs=1;
@@ -88,6 +153,10 @@ module tb_waveform_axis;
                     rgb={xx[7:0],yy[7:0],8'hf5};
                 end
                 @(negedge clk);de=0;
+                // The mailbox may change at the next line blanking; brightness
+                // AND its displayed value must still wait until the next frame.
+                if(BRIGHTNESS_TEST && yy==100)
+                    requested_brightness=f==0 ? 0 : (f==1 ? 10 : 20);
                 repeat(160) @(negedge clk);
             end
             // Fill with HDMI silence BEFORE the next frame: no valid PCM.
@@ -104,6 +173,7 @@ module tb_waveform_axis;
         if(pixels!=3*640*480 || lines!=1440 || frames!=3)
             $fatal(1,"frame counts pixels=%0d lines=%0d frames=%0d",pixels,lines,frames);
         $display("PASS: actual HDMI gain, scrolling history with silent tail, waveform/subtitle 640x480 RGB, preview hiding, SOF and TLAST");
+        if(BRIGHTNESS_TEST) $display("PASS: asynchronous brightness mailbox, three full frames at 100/0/50 percent, frame-stable RGB/BRI glyphs, OSD visible at black, waveform unchanged, AXIS alignment");
         $finish;
     end
     initial begin #300000000; $fatal(1,"AXIS timeout");end

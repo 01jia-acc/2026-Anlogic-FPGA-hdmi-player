@@ -66,6 +66,7 @@ module top(
     input                       switch_pcm_n,   // SW3 (C6): ON=PCM, OFF=arpeggio
     input                       switch_zoom_n,  // SW4 (C5): ON=zoom, OFF=normal
     input                       switch_volume_n, // SW2 (C7): ON=volume adjustment
+    input                       switch_brightness_n, // SW1 (C8): ON=brightness adjustment
 
 	output [5:0]                seg_sel,        // 【输出到 seg_scan/数码管】位选
 	output [7:0]                seg_data,       // 【输出到数码管】段选数据
@@ -176,6 +177,9 @@ wire volume_mode_sd;
 wire [4:0] volume_level_sd;
 // Snapshot bit 50 marks initialized data, so reset keeps the default 75%.
 wire [4:0] volume_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[48:44] : 5'd15;
+wire brightness_mode_sd;
+wire [4:0] brightness_level_sd;
+wire [4:0] brightness_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[55:51] : 5'd20;
 wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
 wire [3:0]  debug_scanner_state;
@@ -447,6 +451,7 @@ end
 sd_card_bmp_fat32 #(
     .SWITCH_MODE_ENABLE(1),
     .VOLUME_CONTROL_ENABLE(1),
+    .BRIGHTNESS_CONTROL_ENABLE(1),
     .THUMBNAIL_ENABLE(1),
     .PCM_ENABLE(AUDIO_PCM_ENABLE && !AUDIO_TEST_ONLY),
     .CLK_FREQ_HZ       (100_000_000), // 参数：sd_card_bmp 工作时钟频率
@@ -468,6 +473,8 @@ sd_card_bmp_fat32 #(
     .key_audio_mode    (key3),                 // KEY3: thumbnail open/confirm/cancel
     .switch_pcm_n(switch_pcm_n), .switch_zoom_n(switch_zoom_n),
     .switch_volume_n(switch_volume_n), .volume_mode(volume_mode_sd), .volume_level(volume_level_sd),
+    .switch_brightness_n(switch_brightness_n),
+    .brightness_mode(brightness_mode_sd), .brightness_level(brightness_level_sd),
     // state_code 只用于数码管调试，不参与图像数据传输。
     .state_code        (state_code),           // 输出：当前扫描/加载状态码
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
@@ -716,6 +723,7 @@ wire [23:0] timestamp_rgb;        // 状态OSD后再叠运行时长，共用像�
 wire [23:0] zoom_rgb;
 wire [23:0] thumbnail_rgb;
 wire [23:0] volume_rgb;
+wire [23:0] brightness_osd_rgb;
 wire [23:0] waveform_rgb;
 wire waveform_vs, waveform_de, waveform_frame_start;
 wire [11:0] waveform_x, waveform_y;
@@ -733,7 +741,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({45'd0,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({39'd0,brightness_mode_sd,brightness_level_sd,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -746,11 +754,10 @@ subtitle_frame_commit u_osd_mem_commit (
 );
 
 // Wipe is composed by the reader: top rows from the new bank, bottom rows
-// from the protected old bank. One read per output pixel, no RGB multipliers.
-// Keep the original fade-in as a build-time option; OSD stays after transitions.
-generate if (TRANSITION_MODE == 1) begin : g_fade_in
+// from the protected old bank. Brightness shares the optional fade's RGB scaling.
+// All OSD/waveform/subtitles stay downstream and readable even at 0% brightness.
 wire [7:0] transition_alpha;
-wire [15:0] transition_r_mix, transition_g_mix, transition_b_mix;
+generate if (TRANSITION_MODE == 1) begin : g_fade_in
 video_fade_in #(.FADE_FRAMES(TRANSITION_FRAMES)) u_video_fade_in (
     .clk              (video_clk),
     .rst              (rst_all),
@@ -761,15 +768,14 @@ video_fade_in #(.FADE_FRAMES(TRANSITION_FRAMES)) u_video_fade_in (
     .active           ()
 );
 
-assign transition_r_mix = vout_data[23:16] * transition_alpha + 16'd255;
-assign transition_g_mix = vout_data[15:8]  * transition_alpha + 16'd255;
-assign transition_b_mix = vout_data[7:0]   * transition_alpha + 16'd255;
-assign transition_rgb = {transition_r_mix[15:8],
-                         transition_g_mix[15:8],
-                         transition_b_mix[15:8]};
 end else begin : g_reader_transition
-    assign transition_rgb = vout_data;
+    assign transition_alpha = 8'd255;
 end endgenerate
+video_brightness u_video_brightness (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .level(brightness_level_pix), .fade_alpha(transition_alpha),
+    .rgb_in(vout_data), .rgb_out(transition_rgb)
+);
 
 osd_overlay_24 #(.OSD_X(8), .OSD_Y(8)) u_osd_overlay (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(de), .rgb_in(transition_rgb),
@@ -799,12 +805,18 @@ volume_status_osd u_volume_status (
     .level(volume_level_pix), .adjust_mode(osd_sd_snapshot[49]),
     .rgb_in(thumbnail_rgb), .rgb_out(volume_rgb)
 );
+volume_status_osd #(.OSD_X(200), .LABEL("BRI"), .DEFAULT_LEVEL(20)) u_brightness_status (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .level(brightness_level_pix), .adjust_mode(osd_sd_snapshot[56]),
+    .rgb_in(volume_rgb), .rgb_out(brightness_osd_rgb)
+);
 // Lesson waveform above the subtitle band (starts at y=438). Listen to the
 // exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(volume_rgb),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(brightness_osd_rgb),
     .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23]),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
     .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
