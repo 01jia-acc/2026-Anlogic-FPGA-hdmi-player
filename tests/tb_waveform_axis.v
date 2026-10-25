@@ -9,25 +9,32 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
     reg control_clk=0;
     always #7 control_clk=~control_clk;
     reg [4:0] requested_brightness=20;
+    reg [5:0] requested_contrast=40;
     integer expected_brightness=20;
+    integer expected_contrast=40;
     wire [23:0] picture_rgb;
     generate if(BRIGHTNESS_TEST) begin : g_brightness
         wire ready;
         wire [95:0] snapshot;
         wire [4:0] level=snapshot[50] ? snapshot[55:51] : 5'd20;
+        wire [5:0] contrast_level=snapshot[50] ? snapshot[62:57] : 6'd20;
         wire [23:0] adjusted_rgb;
+        wire [23:0] brightness_rgb;
         reg prev_vs=1;
         always @(posedge clk) if(rst) prev_vs<=1; else prev_vs<=vs;
         wire frame_start=prev_vs && !vs;
         subtitle_frame_commit mailbox(
             .src_clk(control_clk),.src_rst_n(!rst),.src_commit(ready),.src_ready(ready),
-            .src_text({39'd0,1'b1,requested_brightness,1'b1,50'd0}),.src_length(6'd0),.src_enable(1'b1),
+            .src_text({33'd0,requested_contrast,1'b1,requested_brightness,1'b1,50'd0}),.src_length(6'd0),.src_enable(1'b1),
             .dst_clk(clk),.dst_rst_n(!rst),.frame_start(!de),.dst_text(snapshot),.dst_length(),.dst_enable());
         video_brightness brightness(.clk(clk),.rst_n(!rst),.frame_start(frame_start),
-            .level(level),.fade_alpha(8'd255),.rgb_in(rgb),.rgb_out(adjusted_rgb));
+            .level(level),.contrast_level(contrast_level),.fade_alpha(8'd255),.rgb_in(rgb),.rgb_out(adjusted_rgb));
         volume_status_osd #(.OSD_X(200),.LABEL("BRI"),.DEFAULT_LEVEL(20)) osd(
             .clk(clk),.rst_n(!rst),.frame_start(frame_start),.de(de),.pixel_x(x),.pixel_y(y),
-            .level(level),.adjust_mode(snapshot[56]),.rgb_in(adjusted_rgb),.rgb_out(picture_rgb));
+            .level(level),.adjust_mode(snapshot[56]),.rgb_in(adjusted_rgb),.rgb_out(brightness_rgb));
+        volume_status_osd #(.OSD_X(376),.LABEL("CON"),.LEVEL_BITS(6),.DEFAULT_LEVEL(20)) contrast_osd(
+            .clk(clk),.rst_n(!rst),.frame_start(frame_start),.de(de),.pixel_x(x),.pixel_y(y),
+            .level(contrast_level),.adjust_mode(snapshot[56]),.rgb_in(brightness_rgb),.rgb_out(picture_rgb));
     end else begin : g_original
         assign picture_rgb=rgb;
     end endgenerate
@@ -65,7 +72,7 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
     integer history[0:31];
     integer h,column_blocks;
     reg [23:0] golden;
-    integer brightness_gain,brightness_alpha,rr,gg,bb,osd_col;
+    integer brightness_gain,brightness_alpha,contrast_gain,rr,gg,bb,osd_col;
     reg [7:0] osd_char;
     reg [34:0] osd_glyph;
     reg [4:0] osd_row;
@@ -76,6 +83,10 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
                 "B":reference_glyph=35'b11110_10001_10001_11110_10001_10001_11110;
                 "R":reference_glyph=35'b11110_10001_10001_11110_10100_10010_10001;
                 "I":reference_glyph=35'b11111_00100_00100_00100_00100_00100_11111;
+                "C":reference_glyph=35'b01111_10000_10000_10000_10000_10000_01111;
+                "O":reference_glyph=35'b01110_10001_10001_10001_10001_10001_01110;
+                "N":reference_glyph=35'b10001_11001_10101_10011_10001_10001_10001;
+                "2":reference_glyph=35'b01110_10001_00001_00010_00100_01000_11111;
                 "0":reference_glyph=35'b01110_10001_10001_10001_10001_10001_01110;
                 "1":reference_glyph=35'b00100_01100_00100_00100_00100_00100_01110;
                 "5":reference_glyph=35'b11111_10000_10000_11110_00001_00001_11110;
@@ -100,9 +111,17 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
             if(BRIGHTNESS_TEST) begin
                 brightness_gain=(expected_brightness*256+10)/20;
                 brightness_alpha=(255*brightness_gain+128)/256;
-                rr=(rgb[23:16]*brightness_alpha+255)/256;
-                gg=(rgb[15:8]*brightness_alpha+255)/256;
-                bb=(rgb[7:0]*brightness_alpha+255)/256;
+                contrast_gain=(expected_contrast*128+10)/20;
+                rr=rgb[23:16];gg=rgb[15:8];bb=rgb[7:0];
+                rr=128+(((rr-128)*contrast_gain) >>> 7);
+                gg=128+(((gg-128)*contrast_gain) >>> 7);
+                bb=128+(((bb-128)*contrast_gain) >>> 7);
+                if(rr<0) rr=0; else if(rr>255) rr=255;
+                if(gg<0) gg=0; else if(gg>255) gg=255;
+                if(bb<0) bb=0; else if(bb>255) bb=255;
+                rr=(rr*brightness_alpha+255)/256;
+                gg=(gg*brightness_alpha+255)/256;
+                bb=(bb*brightness_alpha+255)/256;
                 golden={rr[7:0],gg[7:0],bb[7:0]};
                 if(de && x>=200 && x<264 && y>=8 && y<15) begin
                     osd_col=(x-200)/8;
@@ -115,6 +134,19 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
                     osd_glyph=reference_glyph(osd_char);
                     osd_row=osd_glyph >> ((14-y)*5);
                     if((x-200)%8<5 && osd_row[4-(x-200)%8]) golden=24'hffff00;
+                end
+                if(de && x>=376 && x<440 && y>=8 && y<15) begin
+                    osd_col=(x-376)/8;
+                    case(osd_col)
+                        0:osd_char="C"; 1:osd_char="O"; 2:osd_char="N";
+                        4:osd_char=expected_contrast>=40 ? "2" : expected_contrast>=20 ? "1" : " ";
+                        5:osd_char=expected_contrast<2 ? " " : 8'd48+((expected_contrast/2)%10);
+                        6:osd_char=expected_contrast%2 ? "5" : "0";
+                        7:osd_char="%"; default:osd_char=" ";
+                    endcase
+                    osd_glyph=reference_glyph(osd_char);
+                    osd_row=osd_glyph >> ((14-y)*5);
+                    if((x-376)%8<5 && osd_row[4-(x-376)%8]) golden=24'hffff00;
                 end
             end
             column_blocks=(x>=64 && x<576) ? history[(x-64)/16] : 1;
@@ -143,7 +175,10 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
         vs=0;repeat(5) @(negedge clk);vs=1;
         repeat(420000) @(negedge clk);
         for(f=0;f<3;f=f+1) begin
-            if(BRIGHTNESS_TEST) expected_brightness=f==0 ? 20 : (f==1 ? 0 : 10);
+            if(BRIGHTNESS_TEST) begin
+                expected_brightness=f==0 ? 20 : (f==1 ? 0 : 10);
+                expected_contrast=f==0 ? 40 : (f==1 ? 0 : 20);
+            end
             @(negedge clk);vs=0;enable=(f!=1);
             if(f==2) blocks=1;
             repeat(5) @(negedge clk);vs=1;
@@ -155,8 +190,10 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
                 @(negedge clk);de=0;
                 // The mailbox may change at the next line blanking; brightness
                 // AND its displayed value must still wait until the next frame.
-                if(BRIGHTNESS_TEST && yy==100)
+                if(BRIGHTNESS_TEST && yy==100) begin
                     requested_brightness=f==0 ? 0 : (f==1 ? 10 : 20);
+                    requested_contrast=f==0 ? 0 : (f==1 ? 20 : 40);
+                end
                 repeat(160) @(negedge clk);
             end
             // Fill with HDMI silence BEFORE the next frame: no valid PCM.
@@ -173,7 +210,7 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
         if(pixels!=3*640*480 || lines!=1440 || frames!=3)
             $fatal(1,"frame counts pixels=%0d lines=%0d frames=%0d",pixels,lines,frames);
         $display("PASS: actual HDMI gain, scrolling history with silent tail, waveform/subtitle 640x480 RGB, preview hiding, SOF and TLAST");
-        if(BRIGHTNESS_TEST) $display("PASS: asynchronous brightness mailbox, three full frames at 100/0/50 percent, frame-stable RGB/BRI glyphs, OSD visible at black, waveform unchanged, AXIS alignment");
+        if(BRIGHTNESS_TEST) $display("PASS: asynchronous brightness/contrast mailbox, three full frames at 200/0/100 percent contrast, frame-stable RGB/BRI/CON, waveform and AXIS alignment");
         $finish;
     end
     initial begin #300000000; $fatal(1,"AXIS timeout");end

@@ -3,15 +3,25 @@ module tb_video_brightness;
     reg clk=0,rst_n=0,frame=0;
     always #5 clk=~clk;
     reg [4:0] level=20;
+    reg [5:0] contrast=20;
     reg [7:0] alpha=255;
     reg [23:0] rgb=24'hffffff;
     wire [23:0] out_rgb;
-    video_brightness dut(.clk(clk),.rst_n(rst_n),.frame_start(frame),.level(level),
+    video_brightness dut(.clk(clk),.rst_n(rst_n),.frame_start(frame),.level(level),.contrast_level(contrast),
         .fade_alpha(alpha),.rgb_in(rgb),.rgb_out(out_rgb));
     task commit_frame;
         begin @(negedge clk);frame=1;@(negedge clk);frame=0;end
     endtask
-    integer k,a,c,gain,eff,r,g,b,old_result;
+    integer k,a,c,gain,eff,r,g,b,old_result,contrast_gain,gray,brightness;
+    function integer reference_channel;
+        input integer channel, coefficient, alpha_gain;
+        integer clipped;
+        begin
+            clipped=128+(((channel-128)*coefficient) >>> 7);
+            if(clipped<0) clipped=0; else if(clipped>255) clipped=255;
+            reference_channel=(clipped*alpha_gain+255)/256;
+        end
+    endfunction
     reg [23:0] expected;
     initial begin
         repeat(3) @(negedge clk);rst_n=1;
@@ -36,9 +46,49 @@ module tb_video_brightness;
                 end
             end
         end
-        level=0;commit_frame;rst_n=0;#1;
+        level=20;alpha=255;rgb=24'h004080;commit_frame;
+        for(k=0;k<=40;k=k+1) begin
+            contrast=k;old_result=out_rgb;repeat(5) @(negedge clk);
+            if(out_rgb!==old_result[23:0]) $fatal(1,"Midframe contrast change");
+            commit_frame;
+            contrast_gain=(k*128+10)/20;
+            for(c=0;c<256;c=c+1) begin
+                rgb={c[7:0],(8'd255-c[7:0]),8'd128};
+                gray=128+(((c-128)*contrast_gain) >>> 7);
+                if(gray<0) gray=0; else if(gray>255) gray=255;
+                expected={gray[7:0],8'd0,8'd128};
+                gray=128+((((255-c)-128)*contrast_gain) >>> 7);
+                if(gray<0) gray=0; else if(gray>255) gray=255;
+                expected[15:8]=gray[7:0];#1;
+                if(out_rgb!==expected) $fatal(1,"Contrast %0d%% channel=%0d got=%h expected=%h",k*5,c,out_rgb,expected);
+                if(k==20 && out_rgb!==rgb) $fatal(1,"Normal contrast must be bit-exact");
+            end
+        end
+        // Contrast and fade must compose correctly, including black endpoints.
+        // Separate tests of each control miss contrast's offset after a fade.
+        for(brightness=0;brightness<=20;brightness=brightness+10) begin
+            level=brightness;gain=(brightness*256+10)/20;
+            for(k=0;k<=40;k=k+1) begin
+                contrast=k;contrast_gain=(k*128+10)/20;commit_frame;
+                for(a=0;a<256;a=a+1) begin
+                    if(a==0 || a==1 || a==127 || a==254 || a==255) begin
+                        alpha=a;eff=(a*gain+128)/256;
+                        for(c=0;c<256;c=c+1) begin
+                            rgb={c[7:0],(8'd255-c[7:0]),(c[7:0]^8'h55)};
+                            r=reference_channel(c,contrast_gain,eff);
+                            g=reference_channel(255-c,contrast_gain,eff);
+                            b=reference_channel(c^85,contrast_gain,eff);
+                            expected={r[7:0],g[7:0],b[7:0]};#1;
+                            if(out_rgb!==expected) $fatal(1,"Combined controls brightness=%0d contrast=%0d alpha=%0d got=%h expected=%h",brightness,k,a,out_rgb,expected);
+                            if((a==0 || brightness==0) && out_rgb!==0) $fatal(1,"Contrast defeated black endpoint");
+                        end
+                    end
+                end
+            end
+        end
+        level=0;commit_frame;rst_n=0;alpha=255;#1;
         if(out_rgb!==rgb) $fatal(1,"Reset restore from black");
-        $display("PASS: all 21 brightness levels x 256 fade values x 256 RGB values, exact full/zero, frame stability, reset, original fade compatibility");
+        $display("PASS: brightness/fade exhaustive RGB, contrast 0..200%%, combined control/fade black endpoints, saturation, exact defaults, frame stability and reset");
         $finish;
     end
 endmodule

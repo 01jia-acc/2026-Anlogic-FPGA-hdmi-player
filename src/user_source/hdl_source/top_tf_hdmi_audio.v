@@ -59,7 +59,7 @@
 
 module top(
     input                       clk,            // 【输入】板载系统时钟，约 50 MHz
-    input                       rst_n,          // 【输入】外部低有效总复位
+    input                       rst_n,          // KEY1 (A2): reset normally, contrast + with SW1 ON
     input                       key1,           // 板上 KEY2（B2）：按下并松开切下一张
     input                       key2,           // 板上 KEY4（C1）：短按轮播开/关，长按上一张
     input                       key3,           // KEY3: thumbnail open/confirm; hold to cancel
@@ -180,6 +180,8 @@ wire [4:0] volume_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[48:44] : 5'd15
 wire brightness_mode_sd;
 wire [4:0] brightness_level_sd;
 wire [4:0] brightness_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[55:51] : 5'd20;
+wire [5:0] contrast_level_sd;
+wire [5:0] contrast_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[62:57] : 6'd20;
 wire [7:0] pcm_stream_error;
 // FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
 wire [3:0]  debug_scanner_state;
@@ -324,7 +326,10 @@ wire [9:0]  tmds_clk_data;           // 【HDMI IP 输出→PHY】TMDS 时钟通
 // ============================================================================
 // PLL 锁定与统一复位
 // ============================================================================
-// rst_n 是外部低有效复位；rst_all 是内部高有效复位。
+// KEY1 doubles as contrast+ while SW1 is closed. Raw SW1 selects reset so
+// the control logic can leave reset even when KEY1 is held on power-up.
+wire system_reset_n=rst_n | !switch_brightness_n;
+// rst_all 是内部高有效复位。
 // 两个 PLL 都锁定后，再连续等待约 20 ms 才释放 rst_all。
 wire sys_pll_lock;       // 【sys_pll 输出→top】系统 PLL 锁定
 wire video_pll_lock;     // 【video_pll 输出→top】视频 PLL 锁定
@@ -334,7 +339,7 @@ reg [19:0] rst_cnt = 20'd0; // clk 域：PLL 锁定后的稳定计数器
 reg rst_all_reg = 1'b1;      // clk 域：rst_all 的寄存器版本，1=保持复位
 
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!system_reset_n) begin
         rst_cnt <= 20'd0;
         rst_all_reg <= 1'b1;
     end else if (!rst_all_reg) begin
@@ -475,6 +480,7 @@ sd_card_bmp_fat32 #(
     .switch_volume_n(switch_volume_n), .volume_mode(volume_mode_sd), .volume_level(volume_level_sd),
     .switch_brightness_n(switch_brightness_n),
     .brightness_mode(brightness_mode_sd), .brightness_level(brightness_level_sd),
+    .key_contrast_up(rst_n), .contrast_level(contrast_level_sd),
     // state_code 只用于数码管调试，不参与图像数据传输。
     .state_code        (state_code),           // 输出：当前扫描/加载状态码
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
@@ -538,7 +544,7 @@ uart_rx #(
     .BAUD_RATE    (115_200)
 ) u_uart_rx (
     .clk      (clk),
-    .rst      (~rst_n),
+    .rst      (~system_reset_n),
     .rx       (uart_rxd),
     .rx_data  (uart_rx_data),
     .rx_valid (uart_rx_valid)
@@ -561,7 +567,7 @@ uart_debug_logger #(
     .COMPACT_LOG     (1)
 ) u_uart_debug_logger (
     .clk            (clk),
-    .rst            (~rst_n),
+    .rst            (~system_reset_n),
     .pll_ready      (sys_pll_lock && video_pll_lock),
     .sd_init_done   (debug_sd_init_done),
     .state_code     (state_code),
@@ -602,7 +608,7 @@ seg_decoder seg_decoder_m0(
 
 seg_scan seg_scan_m0(
     .clk               (clk),             // 输入：数码管扫描时钟
-    .rst_n             (rst_n),           // 输入：外部低有效复位
+    .rst_n             (system_reset_n),
     .seg_sel           (seg_sel),         // 输出→顶层管脚：数码管位选
     .seg_data          (seg_data),        // 输出→顶层管脚：数码管段选
     .seg_data_0        ({1'b1,7'b1111_111}), // 输入：第 0 位关闭
@@ -725,6 +731,7 @@ wire [23:0] zoom_rgb;
 wire [23:0] thumbnail_rgb;
 wire [23:0] volume_rgb;
 wire [23:0] brightness_osd_rgb;
+wire [23:0] contrast_osd_rgb;
 wire [23:0] waveform_rgb;
 wire waveform_vs, waveform_de, waveform_frame_start;
 wire [11:0] waveform_x, waveform_y;
@@ -742,7 +749,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({39'd0,brightness_mode_sd,brightness_level_sd,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({33'd0,contrast_level_sd,brightness_mode_sd,brightness_level_sd,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -774,7 +781,7 @@ end else begin : g_reader_transition
 end endgenerate
 video_brightness u_video_brightness (
     .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
-    .level(brightness_level_pix), .fade_alpha(transition_alpha),
+    .level(brightness_level_pix), .contrast_level(contrast_level_pix), .fade_alpha(transition_alpha),
     .rgb_in(vout_data), .rgb_out(transition_rgb)
 );
 
@@ -812,13 +819,19 @@ volume_status_osd #(.OSD_X(200), .LABEL("BRI"), .DEFAULT_LEVEL(20)) u_brightness
     .level(brightness_level_pix), .adjust_mode(osd_sd_snapshot[56]),
     .rgb_in(volume_rgb), .rgb_out(brightness_osd_rgb)
 );
+volume_status_osd #(.OSD_X(376), .LABEL("CON"), .LEVEL_BITS(6), .DEFAULT_LEVEL(20)) u_contrast_status (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .level(contrast_level_pix), .adjust_mode(osd_sd_snapshot[56]),
+    .rgb_in(brightness_osd_rgb), .rgb_out(contrast_osd_rgb)
+);
 // Lesson waveform above the subtitle band (starts at y=438). Listen to the
 // exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
 wire opening_active;
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : brightness_osd_rgb),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : contrast_osd_rgb),
     .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23] && !opening_active),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
     .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
