@@ -557,7 +557,8 @@ subtitle_frame_commit u_playlist_debug_commit (
 uart_debug_logger #(
     .CLOCK_FREQ_HZ   (50_000_000),
     .BAUD_RATE       (115_200),
-    .LOG_INTERVAL_MS (1000)
+    .LOG_INTERVAL_MS (1000),
+    .COMPACT_LOG     (1)
 ) u_uart_debug_logger (
     .clk            (clk),
     .rst            (~rst_n),
@@ -814,10 +815,11 @@ volume_status_osd #(.OSD_X(200), .LABEL("BRI"), .DEFAULT_LEVEL(20)) u_brightness
 // Lesson waveform above the subtitle band (starts at y=438). Listen to the
 // exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
+wire opening_active;
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(brightness_osd_rgb),
-    .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23]),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : brightness_osd_rgb),
+    .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23] && !opening_active),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
     .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
     .out_x(waveform_x), .out_y(waveform_y), .frame_start_out(waveform_frame_start),
@@ -825,10 +827,12 @@ promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
 );
 // Waveform and text/font RAM reads each add TWO clocks to RGB and timing.
 // Scroll and text changes commit at the existing OSD VS frame boundary.
-scrolling_subtitle #(.FILE_SUBTITLE_ENABLE(1)) u_scrolling_subtitle (
+scrolling_subtitle #(.FILE_SUBTITLE_ENABLE(1), .INTRO_ENABLE(1)) u_scrolling_subtitle (
     .control_clk(clk), .pixel_clk(video_clk), .rst(rst_all),
     .rx_data(uart_rx_data), .rx_valid(uart_rx_valid),
     .frame_start(waveform_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
+    .intro_selected(video_display_valid && video_image_id==0 && !display_thumbnail[23]),
+    .intro_active(opening_active),
     .file_selected(subtitle_file_selected), .file_show(subtitle_pcm_mode_sync[1]),
     .file_commit_toggle(display_commit_toggle),
     .file_sample_accept(pcm_stream_ready && pcm_stream_valid),

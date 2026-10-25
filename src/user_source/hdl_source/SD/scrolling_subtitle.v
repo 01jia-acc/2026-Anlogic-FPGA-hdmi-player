@@ -7,12 +7,15 @@ module scrolling_subtitle #(
     parameter integer TEXT_Y=442,
     parameter integer FRAME_DIV=1,
     parameter integer LOOP_GAP=64,
-    parameter integer FILE_SUBTITLE_ENABLE=0
+    parameter integer FILE_SUBTITLE_ENABLE=0,
+    parameter integer INTRO_ENABLE=0
 )(
     input wire control_clk, pixel_clk, rst,
     input wire [7:0] rx_data,
     input wire rx_valid,
     input wire frame_start, hide,
+    input wire intro_selected,
+    output wire intro_active,
     input wire file_selected, file_show, file_commit_toggle, file_sample_accept,
     input wire in_vs, in_de,
     input wire [11:0] pixel_x, pixel_y,
@@ -174,6 +177,22 @@ module scrolling_subtitle #(
             .glyph(default_glyph),.length(default_length));
     end endgenerate
     always @(posedge pixel_clk) ram_glyph<=text_ram[{active_bank,source_x[11:4]}];
+    wire [3:0] intro_row, intro_col;
+    wire [7:0] intro_glyph;
+    wire intro_hit, intro_gold;
+    generate if(INTRO_ENABLE) begin : g_intro
+        opening_animation opening(.clk(pixel_clk),.rst(rst),.frame_start(frame_start),
+            .selected(intro_selected),.x(pixel_x),.y(pixel_y),.active(intro_active),
+            .row(intro_row),.col(intro_col),.glyph(intro_glyph),.hit(intro_hit),.gold(intro_gold));
+    end else begin : g_no_intro
+        assign intro_active=0;
+        assign intro_row=0;
+        assign intro_col=0;
+        assign intro_glyph=0;
+        assign intro_hit=0;
+        assign intro_gold=0;
+    end endgenerate
+    reg intro1, intro2, gold1, gold2;
     reg [3:0] row1, col1, col2;
     reg hit1, hit2, band1, band2;
     reg timed1;
@@ -181,17 +200,21 @@ module scrolling_subtitle #(
     reg [1:0] vs_pipe, de_pipe;
     wire [15:0] glyph_row;
     subtitle_font_rom font(.clk(pixel_clk),
-        .address({timed1 ? timed_glyph : runtime_text ? ram_glyph : default_glyph,row1}),.row(glyph_row));
+        .address({intro1 ? intro_glyph : timed1 ? timed_glyph : runtime_text ? ram_glyph : default_glyph,row1}),.row(glyph_row));
     always @(posedge pixel_clk or posedge rst) begin
         if(rst) begin
             row1<=0; col1<=0; col2<=0; hit1<=0; hit2<=0;
             band1<=0; band2<=0; rgb1<=0; rgb2<=0;
             timed1<=0;
+            intro1<=0; intro2<=0; gold1<=0; gold2<=0;
             vs_pipe<=3; de_pipe<=0;
         end else begin
-            row1<=pixel_y-TEXT_Y; col1<=source_x[3:0]; col2<=col1;
+            row1<=intro_active ? intro_row : pixel_y-TEXT_Y;
+            col1<=intro_active ? intro_col : source_x[3:0]; col2<=col1;
             timed1<=timed_mode;
-            hit1<=in_text; hit2<=hit1; band1<=in_band; band2<=band1;
+            intro1<=intro_active; intro2<=intro1; gold1<=intro_gold; gold2<=gold1;
+            hit1<=intro_active ? intro_hit : in_text; hit2<=hit1;
+            band1<=!intro_active && in_band; band2<=band1;
             rgb1<=rgb_in; rgb2<=rgb1;
             vs_pipe<={vs_pipe[0],in_vs}; de_pipe<={de_pipe[0],in_de};
         end
@@ -199,6 +222,56 @@ module scrolling_subtitle #(
     assign out_vs=vs_pipe[1];
     assign out_de=de_pipe[1];
     // Half-black background uses shifts only, retaining full precision elsewhere.
-    assign rgb_out=de_pipe[1] && hit2 && glyph_row[15-col2] ? 24'hffffff :
+    assign rgb_out=de_pipe[1] && hit2 && glyph_row[15-col2] ? (intro2 ? 24'h39281c : 24'hffffff) :
+        de_pipe[1] && gold2 ? 24'hb18539 :
         de_pipe[1] && band2 ? {1'b0,rgb2[23:17],1'b0,rgb2[15:9],1'b0,rgb2[7:1]} : rgb2;
+endmodule
+
+// One shot after the first valid PIC1 frame. State changes only in blanking.
+// Frame timebase avoids a pixel-clock seconds counter; 480 frames ~= 8 seconds.
+module opening_animation(input wire clk, rst, frame_start, selected,
+    input wire [11:0] x,y, output reg active,
+    output wire [3:0] row,col, output wire [7:0] glyph,
+    output reg hit, output wire gold);
+    reg done;
+    reg [8:0] tick;
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin active<=0; done<=0; tick<=0; end
+        else if(frame_start) begin
+            if(active) begin
+                if(!selected || tick==479) begin active<=0; done<=1; end
+                else tick<=tick+1'b1;
+            end else if(!done && selected) begin active<=1; tick<=0; end
+        end
+    end
+    // Fixed rows use bit decodes. Do not build a 12-bit variable top/length
+    // rectangle followed by adders, subtractors and four wide comparisons.
+    wire title_band=y[11:5]==7'd3;
+    wire sub_band=y[11:3]==9'd19 || y[11:3]==9'd20;
+    wire row2=y[11:4]==8'd19, row3=y[11:4]==8'd21;
+    wire row4=y[11:4]==8'd23, row5=y[11:4]==8'd26;
+    wire [5:0] title_phase=tick[5:0]-6'd60;
+    wire [5:0] title_left=tick>=60 && tick<124 ? 6'd8+{1'b0,title_phase[5:1]} : 6'd40;
+    wire [7:0] title_dx=x[7:0]-{2'd0,title_left};
+    wire [8:0] body_dx=x[8:0]-9'd40;
+    reg [2:0] line;
+    always @* begin
+        line=0;
+        if(sub_band) line=1;
+        else if(row2) line=2;
+        else if(row3) line=3;
+        else if(row4) line=4;
+        else if(row5) line=5;
+        hit=active && ((title_band && tick>=60 && x[11:8]==0 && title_dx<128) ||
+            (x[11:9]==0 && ((sub_band && tick>=120 && body_dx<160) ||
+            (row2 && tick>=180 && body_dx<176) || (row3 && tick>=240 && body_dx<176) ||
+            (row4 && tick>=300 && body_dx<224) || (row5 && tick>=390 && body_dx<144))));
+    end
+    assign row=title_band ? y[4:1] : y[3:0] ^ (sub_band ? 4'd8 : 4'd0);
+    assign col=title_band ? title_dx[4:1] : body_dx[3:0];
+    wire [4:0] position=title_band ? {2'd0,title_dx[7:5]} : body_dx[8:4];
+    opening_text_rom text(.clk(clk),.address({line,position}),.glyph(glyph));
+    wire [11:0] line_end=tick<60 ? 12'd40+{tick[5:0],2'd0} : 12'd280;
+    assign gold=active && ((y>=190 && y<192 && x>=40 && x<line_end) ||
+        (y>=452 && y<455 && x>=40 && x<12'd40+{3'd0,tick}));
 endmodule

@@ -18,14 +18,20 @@ try {
     $compileLog | Set-Content -LiteralPath (Join-Path $simDir 'compile.log')
     if ($LASTEXITCODE -ne 0) { $compileLog | Write-Output; throw 'Compilation failed' }
     foreach ($bench in $benches) {
-        $log = @(& (Join-Path $ModelSimBin 'vsim.exe') -c -quiet -suppress 2685,2718 -lib work "work.$bench" -do 'run -all; quit -f' 2>&1)
+        $variants = @('')
+        if ($bench -eq 'tb_uart_diagnostics') { $variants += '-GCOMPACT_LOG=1' }
+        foreach ($variant in $variants) {
+        $extra = @()
+        if ($variant) { $extra += $variant }
+        $log = @(& (Join-Path $ModelSimBin 'vsim.exe') -c -quiet -suppress 2685,2718 -lib work "work.$bench" @extra -do 'onbreak {quit -code 1 -f}; onerror {quit -code 1 -f}; run -all; quit -f' 2>&1)
         $exitCode = $LASTEXITCODE
-        $log | Set-Content -LiteralPath (Join-Path $simDir "$bench.log")
+        $log | Set-Content -LiteralPath (Join-Path $simDir "$bench$variant.log")
         if ($exitCode -ne 0 -or !($log -match 'PASS:') -or ($log -match '\*\* (Fatal|Error):')) {
             $log | Write-Output
             throw "Simulation failed: $bench"
         }
         $log | Where-Object { $_ -match 'PASS:' } | Write-Output
+        }
     }
 } finally {
     Pop-Location

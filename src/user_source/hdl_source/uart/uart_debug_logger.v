@@ -6,7 +6,8 @@
 module uart_debug_logger #(
     parameter integer CLOCK_FREQ_HZ = 50_000_000,
     parameter integer BAUD_RATE     = 115_200,
-    parameter integer LOG_INTERVAL_MS = 1000
+    parameter integer LOG_INTERVAL_MS = 1000,
+    parameter integer COMPACT_LOG = 0
 ) (
     input  wire       clk,
     input  wire       rst,
@@ -49,9 +50,10 @@ module uart_debug_logger #(
     // O: PCM mask/flags/image/slot/error/cluster/size/consumed samples/current sample.
     // PL: coherent playlist mailbox, retaining mask/count/current/physical-file/cache flags.
     // G: first cluster actually accepted by the image file source (compare K).
-    localparam integer MESSAGE_LENGTH = 230;
+    localparam integer MESSAGE_LENGTH = COMPACT_LOG ? 47 : 230;
+    localparam integer INTERVAL_BITS = LOG_INTERVAL_CYCLES<2 ? 1 : $clog2(LOG_INTERVAL_CYCLES);
 
-    reg [31:0] interval_count;
+    reg [INTERVAL_BITS-1:0] interval_count;
     reg        boot_pending;
     reg        message_active;
     reg [7:0]  message_index;
@@ -107,6 +109,40 @@ module uart_debug_logger #(
     function [8:0] message_byte;
         input [7:0] index;
         begin
+            // Constant parameter: unselected verbose mux and snapshot registers
+            // disappear during synthesis, along with debug-only producer cones.
+            if(COMPACT_LOG) begin
+                case(index)
+                    0: message_byte="P"; 1: message_byte="=";
+                    2: message_byte=hex_symbol({3'd0,snap_pll_ready});
+                    4: message_byte="I"; 5: message_byte="=";
+                    6: message_byte=hex_symbol({3'd0,snap_sd_init_done});
+                    8: message_byte="T"; 9: message_byte="=";
+                    10: message_byte=hex_symbol(snap_state_code);
+                    12: message_byte="B"; 13: message_byte="=";
+                    14: message_byte=hex_symbol({3'd0,snap_scan_busy});
+                    16: message_byte="D"; 17: message_byte="=";
+                    18: message_byte=hex_symbol({3'd0,snap_scan_done});
+                    20: message_byte="E"; 21: message_byte="=";
+                    22: message_byte=hex_symbol(snap_scan_error[7:4]);
+                    23: message_byte=hex_symbol(snap_scan_error[3:0]);
+                    25: message_byte="V"; 26: message_byte="=";
+                    27: message_byte=hex_symbol({3'd0,snap_display_valid});
+                    29: message_byte="M"; 30: message_byte="=";
+                    31: message_byte=hex_symbol(snap_resource_valid[15:12]);
+                    32: message_byte=hex_symbol(snap_resource_valid[11:8]);
+                    33: message_byte=hex_symbol(snap_resource_valid[7:4]);
+                    34: message_byte=hex_symbol(snap_resource_valid[3:0]);
+                    36: message_byte="U"; 37: message_byte="=";
+                    38: message_byte=hex_symbol({3'd0,snap_image_count[4]});
+                    39: message_byte=hex_symbol(snap_image_count[3:0]);
+                    41: message_byte="J"; 42: message_byte="=";
+                    43: message_byte=hex_symbol({3'd0,snap_load_image_number[4]});
+                    44: message_byte=hex_symbol(snap_load_image_number[3:0]);
+                    45: message_byte=8'h0d; 46: message_byte=8'h0a;
+                    default: message_byte=" ";
+                endcase
+            end else begin
             case (index)
                 7'd0:  message_byte = "P";
                 7'd1:  message_byte = "=";
@@ -340,6 +376,7 @@ module uart_debug_logger #(
                 8'd227: message_byte = hex_symbol(snap_playlist[0 +:4]);
                 default: message_byte = " ";
             endcase
+            end
         end
     endfunction
 

@@ -1,5 +1,6 @@
 `timescale 1ns/1ps
-module tb_uart_diagnostics;
+module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
+    localparam LENGTH=COMPACT_LOG ? 47 : 230;
     reg clk=0, src_clk=0, rst=1, logger_rst=1;
     always #5 clk=~clk;
     always #3 src_clk=~src_clk;
@@ -23,7 +24,7 @@ module tb_uart_diagnostics;
         .dst_clk(clk), .dst_rst_n(~rst), .frame_start(1'b1),
         .dst_text(mailbox), .dst_length(), .dst_enable()
     );
-    uart_debug_logger #(.CLOCK_FREQ_HZ(1_000_000), .BAUD_RATE(100_000), .LOG_INTERVAL_MS(2)) logger (
+    uart_debug_logger #(.CLOCK_FREQ_HZ(1_000_000), .BAUD_RATE(100_000), .LOG_INTERVAL_MS(2), .COMPACT_LOG(COMPACT_LOG)) logger (
         .clk(clk), .rst(logger_rst), .pll_ready(1'b1), .sd_init_done(1'b1),
         .state_code(4'hf), .scan_busy(1'b0), .scan_done(1'b1), .scan_error(8'h25),
         .display_valid(1'b1), .rx_data(8'd0), .scanner_state(4'd0), .sector_active(1'b0),
@@ -37,24 +38,26 @@ module tb_uart_diagnostics;
         .clk(clk), .rst(logger_rst), .rx(tx), .rx_data(received_byte), .rx_valid(valid)
     );
     always @(posedge clk) if(valid) begin
-        if(received_byte !== expected[(229-received)*8 +:8])
+        if(received_byte !== expected[(LENGTH-1-received)*8 +:8])
             $fatal(1,"UART byte %0d incorrect: %h",received,received_byte);
         received=received+1;
         if(received==10 && lines==0) begin
             cluster=32'hdeadbeef; pipeline=0; playlist=64'hfffefffe0f10e1a5;
             picture_mask=0; picture_count=0; root_crc=0; root_bytes=0; pcm_status=0; scanned_cluster=0;
         end // Current UART line must remain unchanged while source data updates.
-        if(received==230) begin
+        if(received==LENGTH) begin
             lines=lines+1;
             if(lines==2) begin
-                $display("PASS: two full 230-byte UART lines, mailbox CDC, file masks/count/mapping and frozen per-line snapshot");
+                $display("PASS: two UART lines (%0d bytes), mailbox CDC, file masks/count/mapping and frozen per-line snapshot",LENGTH);
                 $finish;
             end
             received=0;
             expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 S=0 A=0 L=0000358E C=1FF Q=11 X=0 F=0 N=077B R=00 J=02 K=DEADBEEF Z=000E1036 H=0000000000000000 M=0000 U=00 W=00000000 Y=0000 O=0000000000000000000000000000000000000000 G=00000000 PL=FFFEFFFE0F10E1A5",8'h0d,8'h0a};
+            if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=0000 U=00 J=02",8'h0d,8'h0a};
         end
     end
     initial begin
+        if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=03FF U=0A J=02",8'h0d,8'h0a};
         repeat(10) @(negedge clk); rst=0;
         repeat(20) @(negedge clk); logger_rst=0;
     end
