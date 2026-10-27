@@ -20,6 +20,14 @@ module tb_scrolling_subtitle;
         .in_vs(in_vs),.in_de(in_de),.pixel_x(x),.pixel_y(y),.rgb_in(rgb),
         .out_vs(out_vs),.out_de(out_de),.rgb_out(rgb_out),.busy(busy),.rejected_lines(rejected));
 
+    function [15:0] font_row;
+        input integer address;
+        begin
+            if(address<4096) font_row=dut.font.pixels0[address];
+            else if(address<6144) font_row=dut.font.pixels1[address-4096];
+            else font_row=dut.font.pixels2[address-6144];
+        end
+    endfunction
     task send;
         input [7:0] value;
         integer bit_no;
@@ -56,7 +64,7 @@ module tb_scrolling_subtitle;
     reg check_pixels=0;
     reg model_enabled=0;
     integer model_length=0, model_offset=0;
-    reg [7:0] model_text [0:255];
+    reg [8:0] model_text [0:255];
     reg [23:0] expected_prev=0, expected_now;
     reg expected_de=0, expected_vs=1, prev_valid=0;
     integer local_x, glyph_id, address;
@@ -70,7 +78,7 @@ module tb_scrolling_subtitle;
                 expected_now={1'b0,rgb[23:17],1'b0,rgb[15:9],1'b0,rgb[7:1]};
                 if(y>=TEXT_Y && y<TEXT_Y+16 && local_x>=0 && local_x<model_length*16) begin
                     glyph_id=model_text[local_x/16]; address=glyph_id*16+(y-TEXT_Y);
-                    reference_row=dut.font.pixels[address];
+                    reference_row=font_row(address);
                     if(reference_row[15-local_x%16]) expected_now=24'hffffff;
                 end
             end
@@ -97,9 +105,10 @@ module tb_scrolling_subtitle;
     endtask
     integer i, old_length, old_bank, saved_offset, rejects;
     integer boot_length;
-    wire [7:0] huan_glyph, ying_glyph;
+    wire [8:0] huan_glyph, ying_glyph, zhong_glyph;
     subtitle_unicode_map map_huan(.codepoint(16'h6b22),.glyph(huan_glyph));
     subtitle_unicode_map map_ying(.codepoint(16'h8fce),.glyph(ying_glyph));
+    subtitle_unicode_map map_zhong(.codepoint(16'h4e2d),.glyph(zhong_glyph));
     initial begin
         repeat(12) @(negedge control_clk); rst=0;
         frame;
@@ -145,6 +154,15 @@ module tb_scrolling_subtitle;
         model_length=4;
         for(i=0;i<WIDTH+32;i=i+1) frame;
         model_offset=WIDTH+32; raster;
+
+        // A new glyph above 255 must survive UTF-8 mapping, RAM and font addressing.
+        send(8'he4); send(8'hb8); send(8'had); // 中
+        commit_line(1);
+        if(zhong_glyph<256 || dut.text_ram[{dut.active_bank,8'd0}]!=zhong_glyph)
+            $fatal(1,"Nine-bit glyph truncated");
+        model_text[0]=zhong_glyph; model_length=1;
+        for(i=0;i<WIDTH;i=i+1) frame;
+        model_offset=WIDTH; raster;
 
         // Active bank cannot be modified by UART, even when a whole new line
         // arrives before the pending update has received a frame ACK.

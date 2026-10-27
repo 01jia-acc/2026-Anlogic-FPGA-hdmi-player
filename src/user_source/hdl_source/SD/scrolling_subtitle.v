@@ -17,6 +17,7 @@ module scrolling_subtitle #(
     input wire intro_selected,
     output wire intro_active,
     input wire file_selected, file_show, file_commit_toggle, file_sample_accept,
+    input wire [1:0] file_track, // 0=AUDIO4, 1=AUDIO5, 2=AUDIO6
     input wire in_vs, in_de,
     input wire [11:0] pixel_x, pixel_y,
     input wire [23:0] rgb_in,
@@ -25,7 +26,7 @@ module scrolling_subtitle #(
     output wire busy,
     output reg [15:0] rejected_lines
 );
-    reg [7:0] text_ram [0:511]; /* fehdl force_ram=1, ram_style="bram" */
+    reg [8:0] text_ram [0:511]; /* fehdl force_ram=1, ram_style="bram" */
     reg write_bank, publish_bank, request_toggle;
     reg ack_toggle, ack_sync1, ack_sync2;
     reg [8:0] receive_length, publish_length;
@@ -36,8 +37,12 @@ module scrolling_subtitle #(
     wire [20:0] completed_unicode={utf_value[14:0],rx_data[5:0]};
     wire unicode_valid=completed_unicode>=utf_minimum && completed_unicode<=21'hffff &&
         !(completed_unicode>=21'hd800 && completed_unicode<=21'hdfff);
-    wire [7:0] mapped_glyph;
-    subtitle_unicode_map map(.codepoint(completed_unicode[15:0]),.glyph(mapped_glyph));
+    wire [8:0] mapped_glyph;
+    wire lookup_busy, lookup_done;
+    reg [8:0] lookup_address;
+    wire lookup_start;
+    subtitle_unicode_lookup map(.clk(control_clk),.rst(rst),.start(lookup_start),
+        .codepoint(completed_unicode[15:0]),.busy(lookup_busy),.done(lookup_done),.glyph(mapped_glyph));
     assign busy=request_toggle!=ack_sync2;
 
     // RAM write has its own clocked process and no reset on the RAM array.
@@ -48,13 +53,22 @@ module scrolling_subtitle #(
         (utf_remaining!=0 && continuation && utf_remaining==1) ||
         (utf_remaining==0 && rx_data>=128 && !(rx_data>=8'hc2 && rx_data<=8'hf4)) ||
         (utf_remaining!=0 && !continuation);
-    wire [7:0] incoming_glyph=utf_remaining!=0 ?
+    wire [8:0] incoming_glyph=utf_remaining!=0 ?
         (continuation && unicode_valid ? mapped_glyph : 8'h3f) :
         (rx_data<128 ? rx_data : 8'h3f);
     wire ram_write=!rst && rx_valid && !line_end && !busy && !dropped_line &&
         !overflow && receive_length<256 && emit_glyph;
-    always @(posedge control_clk)
-        if(ram_write) text_ram[{write_bank,receive_length[7:0]}]<=incoming_glyph;
+    assign lookup_start=ram_write && utf_remaining!=0 && continuation && unicode_valid;
+    // At 50 MHz / 115200 baud, adjacent UART bytes are >4300 clocks apart.
+    // The binary search completes within 11 clocks; hold the write address
+    // until its result arrives. Glyph RAM retains a single physical write port.
+    wire text_write=lookup_done || (ram_write && !lookup_start);
+    wire [8:0] text_write_address=lookup_done ? lookup_address : {write_bank,receive_length[7:0]};
+    wire [8:0] text_write_glyph=lookup_done ? mapped_glyph : incoming_glyph;
+    always @(posedge control_clk) begin
+        if(lookup_start) lookup_address<={write_bank,receive_length[7:0]};
+        if(text_write) text_ram[text_write_address]<=text_write_glyph;
+    end
 
     always @(posedge control_clk or posedge rst) begin
         if(rst) begin
@@ -137,7 +151,8 @@ module scrolling_subtitle #(
     // Two synchronous ROM/RAM reads, with RGB/VS/DE delayed by the same clocks.
     // No wide packed-string multiplexer and no pixel-rate divider/multiplier.
     wire [13:0] sum_x={2'd0,pixel_x}+{1'b0,scroll_offset};
-    wire [7:0] timed_glyph;
+    wire [8:0] timed_glyph;
+    wire [7:0] intro_address;
     wire timed_visible;
     wire [5:0] timed_length;
     wire [11:0] timed_left=(VIEW_WIDTH-({6'd0,timed_length}<<4))>>1;
@@ -148,6 +163,7 @@ module scrolling_subtitle #(
     wire [13:0] source_x=timed_mode ? {2'd0,pixel_x}-{2'd0,timed_left} : sum_x-VIEW_WIDTH;
     generate if(FILE_SUBTITLE_ENABLE) begin : g_file_subtitle
         audio4_subtitle_timeline timeline(.clk(pixel_clk), .rst(rst), .frame_start(frame_start),
+            .track(file_track), .opening(intro_active), .opening_address(intro_address),
             .hide(hide), .selected(file_selected), .show(file_show),
             .commit_toggle(file_commit_toggle), .sample_accept(file_sample_accept),
             .character_position(source_x[9:4]), .glyph(timed_glyph),
@@ -165,8 +181,8 @@ module scrolling_subtitle #(
         (!FILE_SUBTITLE_ENABLE || !hide);
     wire in_band=((timed_mode && timed_visible) || (scrolling_visible && text_length!=0)) && pixel_x<VIEW_WIDTH &&
         pixel_y>=TEXT_Y-4 && pixel_y<TEXT_Y+20;
-    wire [7:0] default_glyph;
-    reg [7:0] ram_glyph;
+    wire [8:0] default_glyph;
+    reg [8:0] ram_glyph;
     generate if(FILE_SUBTITLE_ENABLE) begin : g_no_boot_text
         // The SRT replaces boot scrolling text. Eliminate its unused ROM and
         // length-dependent scroll logic from the production configuration.
@@ -178,17 +194,23 @@ module scrolling_subtitle #(
     end endgenerate
     always @(posedge pixel_clk) ram_glyph<=text_ram[{active_bank,source_x[11:4]}];
     wire [3:0] intro_row, intro_col;
-    wire [7:0] intro_glyph;
+    wire [8:0] intro_glyph;
     wire intro_hit, intro_gold;
     generate if(INTRO_ENABLE) begin : g_intro
         opening_animation opening(.clk(pixel_clk),.rst(rst),.frame_start(frame_start),
             .selected(intro_selected),.x(pixel_x),.y(pixel_y),.active(intro_active),
-            .row(intro_row),.col(intro_col),.glyph(intro_glyph),.hit(intro_hit),.gold(intro_gold));
+            .row(intro_row),.col(intro_col),.text_address(intro_address),.hit(intro_hit),.gold(intro_gold));
+        if(FILE_SUBTITLE_ENABLE) begin : g_shared_text
+            assign intro_glyph=timed_glyph;
+        end else begin : g_opening_only
+            opening_text_rom text(.clk(pixel_clk),.address(intro_address),.glyph(intro_glyph));
+        end
     end else begin : g_no_intro
         assign intro_active=0;
         assign intro_row=0;
         assign intro_col=0;
         assign intro_glyph=0;
+        assign intro_address=0;
         assign intro_hit=0;
         assign intro_gold=0;
     end endgenerate
@@ -227,21 +249,20 @@ module scrolling_subtitle #(
         de_pipe[1] && band2 ? {1'b0,rgb2[23:17],1'b0,rgb2[15:9],1'b0,rgb2[7:1]} : rgb2;
 endmodule
 
-// One shot after the first valid PIC1 frame. State changes only in blanking.
+// Replay on each PIC1 entry, then hold the final text until leaving PIC1.
+// State changes only in blanking; the final tick saturates instead of wrapping.
 // Frame timebase avoids a pixel-clock seconds counter; 480 frames ~= 8 seconds.
 module opening_animation(input wire clk, rst, frame_start, selected,
     input wire [11:0] x,y, output reg active,
-    output wire [3:0] row,col, output wire [7:0] glyph,
+    output wire [3:0] row,col, output wire [7:0] text_address,
     output reg hit, output wire gold);
-    reg done;
     reg [8:0] tick;
     always @(posedge clk or posedge rst) begin
-        if(rst) begin active<=0; done<=0; tick<=0; end
+        if(rst) begin active<=0; tick<=0; end
         else if(frame_start) begin
-            if(active) begin
-                if(!selected || tick==479) begin active<=0; done<=1; end
-                else tick<=tick+1'b1;
-            end else if(!done && selected) begin active<=1; tick<=0; end
+            if(!selected) begin active<=0; tick<=0; end
+            else if(!active) begin active<=1; tick<=0; end
+            else if(tick<479) tick<=tick+1'b1;
         end
     end
     // Fixed rows use bit decodes. Do not build a 12-bit variable top/length
@@ -270,7 +291,7 @@ module opening_animation(input wire clk, rst, frame_start, selected,
     assign row=title_band ? y[4:1] : y[3:0] ^ (sub_band ? 4'd8 : 4'd0);
     assign col=title_band ? title_dx[4:1] : body_dx[3:0];
     wire [4:0] position=title_band ? {2'd0,title_dx[7:5]} : body_dx[8:4];
-    opening_text_rom text(.clk(clk),.address({line,position}),.glyph(glyph));
+    assign text_address={line,position};
     wire [11:0] line_end=tick<60 ? 12'd40+{tick[5:0],2'd0} : 12'd280;
     assign gold=active && ((y>=190 && y<192 && x>=40 && x<line_end) ||
         (y>=452 && y<455 && x>=40 && x<12'd40+{3'd0,tick}));

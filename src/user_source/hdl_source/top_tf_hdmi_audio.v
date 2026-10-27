@@ -366,7 +366,7 @@ always @(posedge video_clk or posedge rst_all)
         subtitle_pcm_mode_sync<={subtitle_pcm_mode_sync[0],pcm_mode};
         subtitle_pcm_ack_sync<={subtitle_pcm_ack_sync[0],pcm_commit_ack};
     end
-assign subtitle_file_selected=video_display_valid && pcm_file_number_pix==4 &&
+assign subtitle_file_selected=video_display_valid && pcm_file_number_pix>=4 && pcm_file_number_pix<=6 &&
     subtitle_pcm_ack_sync[1]==display_commit_toggle;
 
 // 图片选择在 SD 时钟域产生；只在下一次视频读帧请求到来时提交。
@@ -846,6 +846,7 @@ scrolling_subtitle #(.FILE_SUBTITLE_ENABLE(1), .INTRO_ENABLE(1)) u_scrolling_sub
     .frame_start(waveform_frame_start), .hide(display_thumbnail[23] || !video_display_valid),
     .intro_selected(video_display_valid && video_image_id==0 && !display_thumbnail[23]),
     .intro_active(opening_active),
+    .file_track(pcm_file_number_pix==5 ? 2'd1 : pcm_file_number_pix==6 ? 2'd2 : 2'd0),
     .file_selected(subtitle_file_selected), .file_show(subtitle_pcm_mode_sync[1]),
     .file_commit_toggle(display_commit_toggle),
     .file_sample_accept(pcm_stream_ready && pcm_stream_valid),

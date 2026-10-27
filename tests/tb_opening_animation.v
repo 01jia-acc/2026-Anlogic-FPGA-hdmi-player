@@ -19,6 +19,14 @@ module tb_opening_animation;
             @(negedge clk); frame_start=0;
         end
     endtask
+    function [15:0] font_row;
+        input integer address;
+        begin
+            if(address<4096) font_row=dut.font.pixels0[address];
+            else if(address<6144) font_row=dut.font.pixels1[address-4096];
+            else font_row=dut.font.pixels2[address-6144];
+        end
+    endfunction
     integer i,j,tick,line,left,top,scale,dx,dy,char_id,bits;
     reg [23:0] expected, prev_rgb=0;
     reg prev_de=0,prev_vs=1;
@@ -40,8 +48,8 @@ module tb_opening_animation;
                     left=line==0 && tick<124 ? 8+(tick-60)/2 : 40;
                     dx=x-left; dy=y-top;
                     if(tick>=j && dx>=0 && dx<(line==0 ? 128 : 512) && dy>=0 && dy<16*scale) begin
-                        char_id=dut.g_intro.opening.text.text_rom[line*32+dx/(16*scale)];
-                        bits=dut.font.pixels[char_id*16+dy/scale];
+                        char_id=dut.g_file_subtitle.timeline.data.text_rom[768+line*32+dx/(16*scale)];
+                        bits=font_row(char_id*16+dy/scale);
                         if(bits & (32768>>(dx/scale%16))) expected=24'h39281c;
                     end
                 end
@@ -82,15 +90,19 @@ module tb_opening_animation;
             if(i==90 || i==210 || i==330 || i==450) scan_frame;
         end
         pulse_frame;
-        if(active) $fatal(1,"Did not finish after 480 frames");
+        if(!active || dut.g_intro.opening.tick!=479) $fatal(1,"Final text did not hold");
+        tick=479;scan_frame;
+        repeat(520) pulse_frame;
+        if(!active || dut.g_intro.opening.tick!=479) $fatal(1,"Final frame wrapped or vanished");
         selected=0;pulse_frame;selected=1;pulse_frame;
-        if(active) $fatal(1,"Replayed on returning to PIC1");
-        tick=480;scan_frame;
+        if(!active || dut.g_intro.opening.tick!=0) $fatal(1,"Returning to PIC1 must restart");
+        tick=0;scan_frame;
         @(negedge clk);rst=1;repeat(3) @(negedge clk);rst=0;
         pulse_frame;if(!active) $fatal(1,"Reset must rearm intro");
         selected=0;pulse_frame;if(active) $fatal(1,"Navigation did not cancel intro");
-        selected=1;pulse_frame;if(active) $fatal(1,"Cancelled intro replayed");
-        $display("PASS: opening RGB/VS/DE at 640x480, staged text, 480 frames, once/reset/cancel");
+        selected=1;pulse_frame;
+        if(!active || dut.g_intro.opening.tick!=0) $fatal(1,"Cancelled intro must replay on return");
+        $display("PASS: opening RGB/VS/DE at 640x480, staged text, final frame hold/no wrap, reentry/reset/cancel/replay");
         $finish;
     end
     initial begin #50000000;$fatal(1,"Timeout");end

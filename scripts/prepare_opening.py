@@ -29,11 +29,13 @@ def main():
         assert check.tobytes() == background.tobytes()
     font = (ROOT / 'src/user_source/hdl_source/SD/subtitle_font.v').read_text(encoding='utf-8')
     ids = {chr(i): i for i in range(32, 127)}
-    ids.update({chr(int(c,16)): int(i,16) for c,i in re.findall(r"16'h([0-9a-f]+): glyph=8'h([0-9a-f]+)", font)})
-    pixels = {int(a): int(v,16) for a,v in re.findall(r"pixels\[(\d+)\]=16'h([0-9a-f]+)", font)}
+    ids.update({chr(int(c,16)): int(i,16) for c,i in re.findall(r"16'h([0-9a-f]+): glyph=[89]'h([0-9a-f]+)", font)})
+    bases = [int(x) for x in re.findall(r'// Font row base (\d+),', font)]
+    pixels = {bases[int(b)]+int(a): int(v,16) for b,a,v in
+              re.findall(r"pixels(\d+)\[(\d+)\]=16'h([0-9a-f]+)", font)}
     texts = (ROOT / 'assets/opening.txt').read_text(encoding='utf-8').splitlines()
     sheet = Image.new('RGB', (1280, 960))
-    for panel, tick in enumerate((90, 210, 330, 450)):
+    for panel, tick in enumerate((90, 210, 330, 479)):
         frame = background.copy()
         draw = ImageDraw.Draw(frame)
         draw.rectangle((40,190,279,191), fill='#b18539')
@@ -51,6 +53,8 @@ def main():
                             px,py = left+(col*16+x)*scale,top+y*scale
                             draw.rectangle((px,py,px+scale-1,py+scale-1),fill='#39281c')
         sheet.paste(frame, ((panel%2)*640,(panel//2)*480))
+        if tick == 479:
+            frame.save(output / 'final.png')
     sheet.save(output / 'preview.png')
     if args.card:
         target = args.card.resolve() / 'PIC1.BMP'

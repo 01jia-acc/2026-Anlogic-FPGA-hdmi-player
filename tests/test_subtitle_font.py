@@ -13,38 +13,63 @@ FONT = ROOT / 'src/user_source/hdl_source/SD/subtitle_font.v'
 
 
 class SubtitleFontTests(unittest.TestCase):
+    def test_serial_lookup_table_matches_original_mapping(self):
+        source = FONT.read_text(encoding='utf-8')
+        mapping = {int(c,16):int(i,16) for c,i in
+                   re.findall(r"16'h([0-9a-f]+): glyph=9'h([0-9a-f]+)",source)}
+        rows = [(int(n),int(c,16),int(i,16)) for n,c,i in
+                re.findall(r"9'd(\d+): entry=\{16'h([0-9a-f]+),9'h([0-9a-f]+)\};",source)]
+        self.assertEqual([n for n,c,i in rows],list(range(len(mapping))))
+        self.assertEqual([c for n,c,i in rows],sorted(mapping))
+        self.assertEqual({c:i for n,c,i in rows},mapping)
+
     def test_compiled_srt_uses_current_font_and_timestamps(self):
         font = FONT.read_text(encoding='utf-8')
         code_to_id = {i: i for i in range(32, 127)}
         code_to_id.update({int(c, 16): int(i, 16) for c, i in
-                          re.findall(r"16'h([0-9a-f]+): glyph=8'h([0-9a-f]+)", font)})
+                          re.findall(r"16'h([0-9a-f]+): glyph=9'h([0-9a-f]+)", font)})
         rtl = (FONT.parent / 'audio4_subtitle_data.v').read_text(encoding='utf-8')
-        rom = {int(a): int(v, 16) for a, v in re.findall(r"text_rom\[(\d+)\]=8'h([0-9a-f]+)", rtl)}
-        cues = (ROOT / 'assets/AUDIO4.srt').read_text(encoding='utf-8-sig').strip().split('\n\n')
-        self.assertEqual(len(cues), 8)
-        offset = 0
-        for index, block in enumerate(cues):
-            lines = block.splitlines()
-            text = ''.join(lines[2:])
-            self.assertEqual([rom[offset+i] for i in range(len(text))], [code_to_id[ord(c)] for c in text])
-            self.assertIn(f"3'd{index}: base=8'd{offset};", rtl)
-            ticks = []
-            for timestamp in lines[1].split(' --> '):
-                t = datetime.datetime.strptime(timestamp, '%H:%M:%S,%f')
-                ticks.append(((t.hour*3600+t.minute*60+t.second)*1000000+t.microsecond)*48000//1000000)
-            self.assertIn(f"start_sample=22'd{ticks[0]}; end_sample=22'd{ticks[1]}; length=6'd{len(text)};", rtl)
-            offset += len(text)
-        self.assertEqual(offset, len((ROOT / 'assets/subtitle.txt').read_text(encoding='utf-8-sig').strip()))
+        rom = {int(a): int(v, 16) for a, v in re.findall(r"text_rom\[(\d+)\]=9'h([0-9a-f]+)", rtl)}
+        self.assertEqual(set(rom), set(range(1024)))
+        for track, number in enumerate((4, 5, 6)):
+            cues = re.split(r'\n\s*\n', (ROOT / f'assets/AUDIO{number}.srt').read_text(encoding='utf-8-sig').strip())
+            self.assertEqual(len(cues), 8)
+            offset = 0
+            for index, block in enumerate(cues):
+                lines = block.splitlines()
+                text = ''.join(lines[2:])
+                self.assertEqual([rom[track*256+offset+i] for i in range(len(text))], [code_to_id[ord(c)] for c in text])
+                self.assertIn(f"5'd{track*8+index}: base=8'd{offset};", rtl)
+                ticks = []
+                for timestamp in lines[1].split(' --> '):
+                    t = datetime.datetime.strptime(timestamp, '%H:%M:%S,%f')
+                    ticks.append(((t.hour*3600+t.minute*60+t.second)*1000000+t.microsecond)*48000//1000000)
+                self.assertIn(f"5'd{track*8+index}: begin start_sample=22'd{ticks[0]}; end_sample=22'd{ticks[1]}; length=6'd{len(text)};", rtl)
+                offset += len(text)
+            path = 'assets/subtitle.txt' if number == 4 else f'assets/AUDIO{number}.txt'
+            self.assertEqual(offset, len((ROOT / path).read_text(encoding='utf-8-sig').strip()))
+        opening = (ROOT / 'assets/opening.txt').read_text(encoding='utf-8-sig').splitlines()
+        for i in range(256):
+            char = opening[i//32][i%32] if i//32<6 and i%32<len(opening[i//32]) else ' '
+            self.assertEqual(rom[768+i], code_to_id[ord(char)])
 
     def test_checked_in_font_and_default_paragraph(self):
         source = FONT.read_text(encoding='utf-8')
-        pixels = {int(a): int(v, 16) for a, v in re.findall(r"pixels\[(\d+)\]=16'h([0-9a-f]+)", source)}
-        self.assertEqual(set(pixels), set(range(4096)))
+        bases = [int(x) for x in re.findall(r'// Font row base (\d+),', source)]
+        depths = [int(x)+1 for x in re.findall(r'pixels\d+ \[0:(\d+)\]', source)]
+        self.assertEqual(depths, [4096, 2048, 1024])
+        self.assertTrue(all(d & (d-1) == 0 for d in depths))
+        pixels = {bases[int(b)]+int(a): int(v,16) for b,a,v in
+                  re.findall(r"pixels(\d+)\[(\d+)\]=16'h([0-9a-f]+)", source)}
+        depth = sum(depths)
+        self.assertEqual(set(pixels), set(range(depth)))
         code_to_id = {i: i for i in range(32, 127)}
-        code_to_id.update({int(c, 16): int(i, 16) for c, i in re.findall(r"16'h([0-9a-f]+): glyph=8'h([0-9a-f]+)", source)})
+        code_to_id.update({int(c, 16): int(i, 16) for c, i in re.findall(r"16'h([0-9a-f]+): glyph=9'h([0-9a-f]+)", source)})
+        self.assertEqual(len(set(code_to_id.values())), len(code_to_id))
+        self.assertGreater(max(code_to_id.values()), 255)
         text = (ROOT / 'assets/subtitle.txt').read_text(encoding='utf-8-sig').strip()
         length = int(re.search(r"assign length=9'd(\d+)", source).group(1))
-        ids = [int(i, 16) for i in re.findall(r"8'd\d+: glyph<=8'h([0-9a-f]+)", source)]
+        ids = [int(i, 16) for i in re.findall(r"8'd\d+: glyph<=9'h([0-9a-f]+)", source)]
         self.assertEqual(length, len(text))
         self.assertEqual(ids, [code_to_id[ord(c)] for c in text])
         font = ImageFont.truetype('C:/Windows/Fonts/simsun.ttc', 16)
