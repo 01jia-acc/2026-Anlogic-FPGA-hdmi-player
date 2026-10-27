@@ -13,7 +13,7 @@ try {
     & (Join-Path $ModelSimBin 'vlog.exe') -work work @sources
     if ($LASTEXITCODE -ne 0) { throw 'Opening compilation failed' }
     foreach ($bench in @('tb_subtitle_unicode_lookup','tb_subtitle_font_banks','tb_opening_animation','tb_audio4_subtitle')) {
-      $tracks=if($bench -eq 'tb_audio4_subtitle') { @(0,1,2) } else { @(0) }
+      $tracks=if($bench -eq 'tb_audio4_subtitle') { @(0,1,2,3,4,5,6,7,8) } else { @(0) }
       foreach($track in $tracks) {
         $extra=@()
         if($bench -eq 'tb_audio4_subtitle') { $extra += "-GTRACK=$track" }

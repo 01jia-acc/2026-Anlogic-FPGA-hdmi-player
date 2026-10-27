@@ -3,7 +3,7 @@ module tb_audio4_subtitle #(parameter TRACK=0);
     reg clk=0, rst=1;
     always #5 clk=~clk;
     reg selected=0, show=1, epoch=0, accept=0, frame=0, hide=0;
-    reg [1:0] selected_track=TRACK;
+    reg [3:0] selected_track=TRACK;
     reg de=0, vs=1;
     reg [11:0] x=0,y=0;
     reg [23:0] rgb=24'h80c0fe;
@@ -28,7 +28,7 @@ module tb_audio4_subtitle #(parameter TRACK=0);
     integer i,j,pass,position=0,saved,xx,yy,pixels=0;
     reg [23:0] expect0,expect1;
     reg [1:0] deq=0,vsq=3;
-    integer sx,glyph,row;
+    integer sx,glyph,row, text_base;
     // Independent pixel reference uses the compiled font/text contents, while
     // host tests independently compare those contents against UTF-8 SRT.
     always @(posedge clk) begin
@@ -40,7 +40,7 @@ module tb_audio4_subtitle #(parameter TRACK=0);
                 expect0={1'b0,rgb[23:17],1'b0,rgb[15:9],1'b0,rgb[7:1]};
                 sx=x-(640-lengths[0]*16)/2;
                 if(y>=442 && y<458 && sx>=0 && sx<lengths[0]*16) begin
-                    glyph=dut.g_file_subtitle.timeline.data.text_rom[TRACK*256+sx/16];
+                    glyph=dut.g_file_subtitle.timeline.data.text_rom[text_base+sx/16];
                     row=font_row(glyph*16+y-442);
                     if(row & (16'h8000>>(sx%16))) expect0=24'hffffff;
                 end
@@ -71,45 +71,63 @@ module tb_audio4_subtitle #(parameter TRACK=0);
                 $fatal(1,"Sample timeline drift target=%d actual=%d",position,dut.g_file_subtitle.timeline.sample_position);
         end
     endtask
-    integer total_samples=3079722;
+    integer total_samples;
     initial begin
-        starts[0]=12000;ends[0]=383376;lengths[0]=26;
-        starts[1]=392016;ends[1]=812880;lengths[1]=29;
-        starts[2]=821520;ends[2]=1147824;lengths[2]=24;
-        starts[3]=1156464;ends[3]=1513392;lengths[3]=25;
-        starts[4]=1522032;ends[4]=1895136;lengths[4]=28;
-        starts[5]=1903776;ends[5]=2257536;lengths[5]=26;
-        starts[6]=2266176;ends[6]=2642016;lengths[6]=26;
-        starts[7]=2650656;ends[7]=3055728;lengths[7]=31;
-        if(TRACK==1) begin
-            total_samples=3118884;
-            starts[0]=12000;ends[0]=370368;lengths[0]=26;
-            starts[1]=379008;ends[1]=755856;lengths[1]=28;
-            starts[2]=764496;ends[2]=1147872;lengths[2]=28;
-            starts[3]=1156512;ends[3]=1486992;lengths[3]=24;
-            starts[4]=1495632;ends[4]=1879200;lengths[4]=29;
-            starts[5]=1887840;ends[5]=2289936;lengths[5]=28;
-            starts[6]=2298576;ends[6]=2664720;lengths[6]=27;
-            starts[7]=2673360;ends[7]=3094896;lengths[7]=31;
-        end
-        if(TRACK==2) begin
-            total_samples=3242676;
-            starts[0]=12000;ends[0]=377568;lengths[0]=27;
-            starts[1]=386208;ends[1]=735744;lengths[1]=26;
-            starts[2]=744384;ends[2]=1116576;lengths[2]=24;
-            starts[3]=1125216;ends[3]=1534752;lengths[3]=29;
-            starts[4]=1543392;ends[4]=1944096;lengths[4]=27;
-            starts[5]=1952736;ends[5]=2331648;lengths[5]=27;
-            starts[6]=2340288;ends[6]=2753376;lengths[6]=30;
-            starts[7]=2762016;ends[7]=3218688;lengths[7]=35;
-        end
+        case(TRACK)
+            0: begin total_samples=914580; text_base=0;
+                starts[0]=7200;ends[0]=307920;lengths[0]=19;
+                starts[1]=315600;ends[1]=615936;lengths[1]=21;
+                starts[2]=623616;ends[2]=897792;lengths[2]=19;
+            end
+            1: begin total_samples=1070289; text_base=59;
+                starts[0]=7200;ends[0]=328176;lengths[0]=23;
+                starts[1]=335856;ends[1]=753264;lengths[1]=28;
+                starts[2]=760944;ends[2]=1053504;lengths[2]=21;
+            end
+            2: begin total_samples=1031409; text_base=131;
+                starts[0]=7200;ends[0]=305376;lengths[0]=20;
+                starts[1]=313056;ends[1]=679392;lengths[1]=26;
+                starts[2]=687072;ends[2]=1014624;lengths[2]=24;
+            end
+            3: begin total_samples=1066659; text_base=201;
+                starts[0]=7200;ends[0]=297024;lengths[0]=20;
+                starts[1]=304704;ends[1]=620208;lengths[1]=22;
+                starts[2]=627888;ends[2]=1049856;lengths[2]=29;
+            end
+            4: begin total_samples=1027932; text_base=272;
+                starts[0]=7200;ends[0]=305664;lengths[0]=22;
+                starts[1]=313344;ends[1]=667152;lengths[1]=26;
+                starts[2]=674832;ends[2]=1011120;lengths[2]=24;
+            end
+            5: begin total_samples=1055028; text_base=344;
+                starts[0]=7200;ends[0]=366336;lengths[0]=26;
+                starts[1]=374016;ends[1]=685824;lengths[1]=23;
+                starts[2]=693504;ends[2]=1038240;lengths[2]=25;
+            end
+            6: begin total_samples=1064760; text_base=418;
+                starts[0]=7200;ends[0]=381216;lengths[0]=26;
+                starts[1]=388896;ends[1]=752208;lengths[1]=26;
+                starts[2]=759888;ends[2]=1047936;lengths[2]=20;
+            end
+            7: begin total_samples=1025925; text_base=490;
+                starts[0]=7200;ends[0]=363936;lengths[0]=25;
+                starts[1]=371616;ends[1]=654720;lengths[1]=20;
+                starts[2]=662400;ends[2]=1009104;lengths[2]=24;
+            end
+            8: begin total_samples=997788; text_base=559;
+                starts[0]=7200;ends[0]=342336;lengths[0]=24;
+                starts[1]=350016;ends[1]=654864;lengths[1]=22;
+                starts[2]=662544;ends[2]=980976;lengths[2]=23;
+            end
+            default: $fatal(1,"Invalid test track");
+        endcase
         repeat(5) @(negedge clk);rst=0;selected=1;epoch=1;
         repeat(5) @(negedge clk);
         boundary;
-        if(dut.timed_visible) $fatal(1,"Subtitle before 250ms lead-in");
+        if(dut.timed_visible) $fatal(1,"Subtitle before 150ms lead-in");
         // Two entire narration loops: no accumulated frame/timer drift.
         for(pass=0;pass<2;pass=pass+1) begin
-            for(i=0;i<8;i=i+1) begin
+            for(i=0;i<3;i=i+1) begin
                 advance_to(starts[i]-1);boundary;
                 if(dut.timed_visible) $fatal(1,"Cue early %d",i);
                 advance_to(starts[i]);boundary;
@@ -150,9 +168,9 @@ module tb_audio4_subtitle #(parameter TRACK=0);
         position=0;
         if(dut.timed_visible) $fatal(1,"Revisit did not restart lead-in");
         // Consecutive subtitle-enabled images must reset even if selected stays high.
-        for(j=0;j<3;j=j+1) begin
+        for(j=0;j<9;j=j+1) begin
             advance_to(20000);boundary;
-            selected_track=selected_track==2 ? 0 : selected_track+1'b1;
+            selected_track=selected_track==8 ? 0 : selected_track+1'b1;
             epoch=~epoch;
             repeat(4) @(negedge clk);position=0;boundary;
             if(dut.g_file_subtitle.timeline.sample_position!=0 || dut.timed_visible ||
@@ -163,7 +181,7 @@ module tb_audio4_subtitle #(parameter TRACK=0);
                 $fatal(1,"Direct track change selected wrong text bank");
         end
         if(pixels!=640*480) $fatal(1,"Full-frame coverage");
-        $display("PASS: AUDIO%0d eight SRT cues, exact sample boundaries, two full loops, pause/underflow, preview, revisit, 640x480 RGB/DE/VS",TRACK+4);
+        $display("PASS: AUDIO%0d three SRT cues, exact sample boundaries, two full loops, pause/underflow, preview, revisit, 640x480 RGB/DE/VS",TRACK+2);
         $finish;
     end
     initial begin #200000000; $fatal(1,"AUDIO4 test timeout"); end

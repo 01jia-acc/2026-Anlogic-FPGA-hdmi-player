@@ -4,7 +4,7 @@
 module audio4_subtitle_timeline (
     input wire clk, rst, frame_start, hide,
     input wire selected, show, commit_toggle, sample_accept,
-    input wire [1:0] track,
+    input wire [3:0] track,
     input wire opening, input wire [7:0] opening_address,
     input wire [5:0] character_position,
     output wire [8:0] glyph,
@@ -14,15 +14,9 @@ module audio4_subtitle_timeline (
     reg epoch;
     reg [21:0] sample_position;
     reg [2:0] cue, visible_cue;
-    reg [1:0] active_track, visible_track;
-    reg [1:0] requested_track;
-    always @* begin
-        case(track)
-            1: requested_track=1;
-            2: requested_track=2;
-            default: requested_track=0;
-        endcase
-    end
+    reg [3:0] active_track, visible_track;
+    wire [3:0] requested_track=track<=8 ? track : 4'd0;
+    wire [2:0] last_cue;
     wire [21:0] start_sample, end_sample, total_samples;
     wire [5:0] cue_length;
     // Cue metadata and character ROM share one data instance. Metadata is
@@ -30,7 +24,7 @@ module audio4_subtitle_timeline (
     audio4_subtitle_data data(.clk(clk), .cue(cue), .text_cue(visible_cue), .position(character_position),
         .track(active_track), .text_track(visible_track), .opening(opening), .opening_address(opening_address),
         .glyph(glyph), .start_sample(start_sample), .end_sample(end_sample),
-        .length(cue_length), .total_samples(total_samples));
+        .length(cue_length), .last_cue(last_cue), .total_samples(total_samples));
     wire in_cue=sample_position>=start_sample && sample_position<end_sample;
     always @(posedge clk or posedge rst) begin
         if(rst) begin
@@ -46,7 +40,7 @@ module audio4_subtitle_timeline (
                 if(sample_position==total_samples-1'b1) begin sample_position<=0; cue<=0; end
                 else begin
                     sample_position<=sample_position+1'b1;
-                    if(sample_position>=end_sample && cue!=7) cue<=cue+1'b1;
+                    if(sample_position>=end_sample && cue!=last_cue) cue<=cue+1'b1;
                 end
             end
             if(frame_start) begin

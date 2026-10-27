@@ -105,10 +105,10 @@ module tb_scrolling_subtitle;
     endtask
     integer i, old_length, old_bank, saved_offset, rejects;
     integer boot_length;
-    wire [8:0] huan_glyph, ying_glyph, zhong_glyph;
+    wire [8:0] huan_glyph, ying_glyph, lou_glyph;
     subtitle_unicode_map map_huan(.codepoint(16'h6b22),.glyph(huan_glyph));
     subtitle_unicode_map map_ying(.codepoint(16'h8fce),.glyph(ying_glyph));
-    subtitle_unicode_map map_zhong(.codepoint(16'h4e2d),.glyph(zhong_glyph));
+    subtitle_unicode_map map_zhong(.codepoint(16'h697c),.glyph(lou_glyph));
     initial begin
         repeat(12) @(negedge control_clk); rst=0;
         frame;
@@ -156,11 +156,11 @@ module tb_scrolling_subtitle;
         model_offset=WIDTH+32; raster;
 
         // A new glyph above 255 must survive UTF-8 mapping, RAM and font addressing.
-        send(8'he4); send(8'hb8); send(8'had); // 中
+        send(8'he6); send(8'ha5); send(8'hbc); // 楼
         commit_line(1);
-        if(zhong_glyph<256 || dut.text_ram[{dut.active_bank,8'd0}]!=zhong_glyph)
+        if(lou_glyph<256 || dut.text_ram[{dut.active_bank,8'd0}]!=lou_glyph)
             $fatal(1,"Nine-bit glyph truncated");
-        model_text[0]=zhong_glyph; model_length=1;
+        model_text[0]=lou_glyph; model_length=1;
         for(i=0;i<WIDTH;i=i+1) frame;
         model_offset=WIDTH; raster;
 

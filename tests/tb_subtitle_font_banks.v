@@ -20,13 +20,13 @@ module tb_subtitle_font_banks;
     endtask
     initial begin
         // Alternate banks every clock as well as reading every allocated row.
-        for(i=0;i<7168;i=i+1) begin
+        for(i=0;i<6656;i=i+1) begin
             check(i);
-            check(6144+i%1024);
+            check(6144+i%512);
             check(i%4096);
             check(4096+i%2048);
         end
-        $display("PASS: banked font all 7168 rows and per-clock bank changes, one-clock read latency");
+        $display("PASS: banked font all 6656 rows and per-clock bank changes, one-clock read latency");
         $finish;
     end
     initial begin #1000000; $fatal(1,"Font timeout"); end

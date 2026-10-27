@@ -48,7 +48,7 @@ module tb_opening_animation;
                     left=line==0 && tick<124 ? 8+(tick-60)/2 : 40;
                     dx=x-left; dy=y-top;
                     if(tick>=j && dx>=0 && dx<(line==0 ? 128 : 512) && dy>=0 && dy<16*scale) begin
-                        char_id=dut.g_file_subtitle.timeline.data.text_rom[768+line*32+dx/(16*scale)];
+                        char_id=dut.g_file_subtitle.timeline.data.text_rom[628+line*32+dx/(16*scale)];
                         bits=font_row(char_id*16+dy/scale);
                         if(bits & (32768>>(dx/scale%16))) expected=24'h39281c;
                     end

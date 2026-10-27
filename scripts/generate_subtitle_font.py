@@ -14,7 +14,7 @@ OUT = ROOT / 'src/user_source/hdl_source/SD/subtitle_font.v'
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--text', type=Path, default=ROOT / 'assets/subtitle.txt')
+    parser.add_argument('--text', type=Path, default=ROOT / 'assets/product_20261027/AUDIO2.txt')
     parser.add_argument('--extra', type=Path, action='append', default=[], help='Additional UTF-8 text; repeat for multiple files')
     parser.add_argument('--font', default='C:/Windows/Fonts/simsun.ttc')
     parser.add_argument('--output', type=Path, default=OUT)

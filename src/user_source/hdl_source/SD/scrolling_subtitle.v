@@ -17,7 +17,7 @@ module scrolling_subtitle #(
     input wire intro_selected,
     output wire intro_active,
     input wire file_selected, file_show, file_commit_toggle, file_sample_accept,
-    input wire [1:0] file_track, // 0=AUDIO4, 1=AUDIO5, 2=AUDIO6
+    input wire [3:0] file_track, // 0..8 = AUDIO2..AUDIO10
     input wire in_vs, in_de,
     input wire [11:0] pixel_x, pixel_y,
     input wire [23:0] rgb_in,
@@ -156,7 +156,7 @@ module scrolling_subtitle #(
     wire timed_visible;
     wire [5:0] timed_length;
     wire [11:0] timed_left=(VIEW_WIDTH-({6'd0,timed_length}<<4))>>1;
-    // Production boot paragraph is replaced by the file-4 SRT. UART text still
+    // Production boot paragraph is replaced by per-file SRT. UART text still
     // works on other images; no unrelated boot paragraph accompanies narration.
     wire timed_mode=FILE_SUBTITLE_ENABLE && file_selected;
     wire scrolling_visible=visible && (!FILE_SUBTITLE_ENABLE || runtime_text) && !timed_mode;
