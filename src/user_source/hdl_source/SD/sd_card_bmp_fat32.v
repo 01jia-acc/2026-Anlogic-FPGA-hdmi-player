@@ -291,6 +291,31 @@ module sd_card_bmp_fat32 #(
                            display_ack_image_id == img_idx;
     // Request the next image after three seconds of settled display.
     wire auto_tick = auto_cnt == 3 * CLK_FREQ_HZ - 1;
+    // Split seconds from subsecond clocks: 60*100MHz exceeds 32 bits.
+    localparam integer MANUAL_TICK_BITS=CLK_FREQ_HZ>1 ? $clog2(CLK_FREQ_HZ) : 1;
+    reg [MANUAL_TICK_BITS-1:0] manual_subsecond_count;
+    reg [5:0] manual_seconds;
+    reg [3:0] manual_image_q;
+    wire manual_wait_eligible=sd_init_done && scan_completed && img_found_count>1 &&
+        display_valid && display_settled && !auto_play_en && !preload_halted &&
+        !volume_mode && !brightness_mode && !zoom_mode && !thumbnail_hold &&
+        !next_req_pending && !prev_req_pending && !next_release_pulse &&
+        key_next_stable && key_auto_stable && key_audio_stable &&
+        !next_down_seen && !key_auto_down_seen;
+    wire manual_timeout=manual_wait_eligible && manual_image_q==img_idx &&
+        manual_seconds==6'd59 && manual_subsecond_count==CLK_FREQ_HZ-1;
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            manual_subsecond_count<=0; manual_seconds<=0; manual_image_q<=0;
+        end else begin
+            manual_image_q<=img_idx;
+            if(!manual_wait_eligible || manual_image_q!=img_idx || manual_timeout) begin
+                manual_subsecond_count<=0; manual_seconds<=0;
+            end else if(manual_subsecond_count==CLK_FREQ_HZ-1) begin
+                manual_subsecond_count<=0; manual_seconds<=manual_seconds+1'b1;
+            end else manual_subsecond_count<=manual_subsecond_count+1'b1;
+        end
+    end
     wire [3:0] next_idx = {1'b0,img_idx} + 5'd1 >= img_found_count ? 4'd0 : img_idx + 1'b1;
     wire [3:0] prev_idx = img_idx == 0 ? img_found_count - 1'b1 : img_idx - 1'b1;
     // 没有按键请求时也查询下一张，供后台预读使用；手动请求优先。
@@ -674,6 +699,9 @@ module sd_card_bmp_fat32 #(
                 end else load_timeout_cnt<=0;
 
                 if(scan_completed && img_found_count != 0) begin
+                    // Enter the existing auto mode, including its OSD/audio policy.
+                    // The normal 3-second interval starts after this transition.
+                    if(manual_timeout) auto_play_en<=1;
                     if(thumbnail_hold) begin next_req_pending<=0; prev_req_pending<=0; end
                     else if(next_release_pulse) next_req_pending<=1;
                     if(key_auto_press && !zoom_mode && navigation_keys_enabled) key_auto_down_seen<=1;

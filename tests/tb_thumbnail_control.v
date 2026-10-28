@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 // Real keys/scheduler/display commit/mailbox. File completion and the reader's
 // one-clock-delayed descriptor capture are modeled; reader RGB tested separately.
-module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, parameter BRIGHTNESS_TEST=0);
+module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, parameter BRIGHTNESS_TEST=0, parameter MANUAL_IDLE_TEST=0);
     reg clk=0, pix_clk=0, rst=1;
     always #5 clk=~clk;
     always #20 pix_clk=~pix_clk;
@@ -21,6 +21,14 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
     wire [1:0] display_bank, write_bank, ack_bank, zoom_level;
     wire [3:0] image_id, ack_id;
     wire [3:0] committed_id;
+    wire committed_valid;
+    wire [3:0] selected_pcm_image;
+    wire selected_pcm_toggle;
+    media_pcm_selection pcm_selection (
+        .pixel_clk(pix_clk), .rst(rst), .pcm_mode_sd(pcm_mode), .auto_play_sd(dut.auto_play_en),
+        .display_valid_pix(committed_valid), .display_image_id_pix(committed_id),
+        .display_commit_toggle(audio_toggle), .pcm_image_id_pix(selected_pcm_image),
+        .pcm_commit_toggle(selected_pcm_toggle));
     wire [31:0] descriptor;
     wire [95:0] mailbox;
     wire mailbox_ready;
@@ -50,7 +58,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         .src_clk(clk), .rst(rst), .display_valid_src(display_valid),
         .display_index_src(display_bank), .display_image_id_src(image_id),
         .pixel_clk(pix_clk), .frame_request(frame_req), .audio_commit_toggle(audio_toggle),
-        .display_image_id_pix(committed_id),
+        .display_image_id_pix(committed_id), .display_valid_pix(committed_valid),
         .display_ack_valid_src(ack_valid), .display_ack_bank_src(ack_bank), .display_ack_image_id_src(ack_id)
     );
     thumbnail_exit_gate exit_gate(.requested(mailbox[31:0]), .displayed(displayed),
@@ -79,6 +87,62 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
                 @(negedge pix_clk); frame_req=0;
                 repeat(30) @(negedge pix_clk);
             end
+        end
+    endtask
+    task manual_idle_scenarios;
+        integer remaining;
+        reg old_pcm_toggle;
+        begin
+            fill_window;
+            // Select PCM and the second picture; start timing from its display ACK.
+            switch_pcm_n=0;repeat(65) @(negedge clk);
+            press(2,65);frame;fill_window;
+            if(selected_pcm_image!=1 || !pcm_mode) $fatal(1,"Manual PCM picture selection");
+            remaining=60000-(dut.manual_seconds*1000+dut.manual_subsecond_count);
+            repeat(remaining-1) @(negedge clk);
+            if(dut.auto_play_en || image_id!=1) $fatal(1,"Manual mode ended before 60 seconds");
+            @(negedge clk);
+            if(!dut.auto_play_en || image_id!=1) $fatal(1,"60-second timeout must enable auto without immediate image change");
+            repeat(40) @(negedge clk);
+            if(selected_pcm_image!=0) $fatal(1,"Timeout did not select first PCM soundtrack");
+            old_pcm_toggle=selected_pcm_toggle;
+            repeat(2959) @(negedge clk);
+            if(image_id!=1) $fatal(1,"Automatic navigation occurred before the 3-second interval");
+            wait(image_id==2);frame;
+            if(selected_pcm_image!=0 || selected_pcm_toggle!=old_pcm_toggle)
+                $fatal(1,"Auto image change restarted soundtrack");
+            // Explicitly returning to manual gives a fresh minute.
+            press(4,65);
+            if(dut.auto_play_en || dut.manual_seconds!=0) $fatal(1,"Manual OFF retained idle deadline");
+            fill_window;
+            repeat(20000) @(negedge clk);
+            press(2,65);frame;
+            if(dut.manual_seconds>3 || dut.auto_play_en) $fatal(1,"Manual image change did not reset dwell time");
+            fill_window;
+            // Requested image must not count as shown until display ACK arrives.
+            press(2,65);
+            repeat(61000) @(negedge clk);
+            if(dut.auto_play_en || dut.manual_seconds!=0 || dut.manual_subsecond_count!=0)
+                $fatal(1,"Unacknowledged picture counted toward timeout");
+            frame;fill_window;
+            // Picture/volume adjustments and zoom/preview keep user control.
+            switch_volume_n=0;repeat(61000) @(negedge clk);
+            if(dut.auto_play_en || dut.manual_seconds!=0) $fatal(1,"Volume mode timed out");
+            switch_brightness_n=0;switch_volume_n=1;repeat(61000) @(negedge clk);
+            if(dut.auto_play_en || dut.manual_seconds!=0) $fatal(1,"Brightness mode timed out");
+            switch_zoom_n=0;switch_brightness_n=1;repeat(61000) @(negedge clk);
+            if(!zoom_mode || dut.auto_play_en || dut.manual_seconds!=0) $fatal(1,"Zoom mode timed out");
+            press(3,65);frame;repeat(61000) @(negedge clk);
+            if(!descriptor[23] || dut.auto_play_en) $fatal(1,"Preview timed out");
+            switch_zoom_n=1;frame;repeat(100) @(negedge clk);
+            if(dut.auto_play_en || dut.manual_seconds>3) $fatal(1,"Leaving preview retained old timer");
+            // Single-image and reset cases cannot start a useless slideshow.
+            resources=16'h0001;boot;repeat(61000) @(negedge clk);
+            if(dut.auto_play_en || dut.manual_seconds!=0) $fatal(1,"Single image entered auto");
+            resources=16'h000f;boot;fill_window;repeat(10000) @(negedge clk);
+            boot;
+            if(dut.auto_play_en || dut.manual_seconds>3) $fatal(1,"Reset retained timer");
+            $display("PASS: manual 60-second timeout, 3-second auto navigation, PCM first soundtrack, manual off/image/reset restart, pending ACK, adjustment/zoom/preview and single-image exclusions");
         end
     endtask
     task brightness_scenarios;
@@ -339,6 +403,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=8'd0;
         boot;
+        if(MANUAL_IDLE_TEST) begin manual_idle_scenarios; $finish; end
         if(BRIGHTNESS_TEST) begin brightness_scenarios; $finish; end
         if(VOLUME_TEST) begin volume_scenarios; $finish; end
         if(SWITCH_TEST) begin switch_scenarios; $finish; end
@@ -422,4 +487,9 @@ endmodule
 
 module tb_mode_switch_control;
     tb_thumbnail_control #(.SWITCH_TEST(1)) scenario();
+endmodule
+
+module tb_manual_idle_control;
+    tb_thumbnail_control #(.SWITCH_TEST(1), .VOLUME_TEST(1), .BRIGHTNESS_TEST(1),
+                          .MANUAL_IDLE_TEST(1)) scenario();
 endmodule
