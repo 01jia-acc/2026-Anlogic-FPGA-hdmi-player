@@ -25,6 +25,7 @@ module media_frame_loader #(
     output reg                   load_done,
     output reg  [3:0]            image_complete,
     output reg  [7:0]            memory_error,
+    output wire [47:0]           debug_writer_status, // error / received / written
     input  wire                  controller_init_done,
     input  wire                  controller_busy,
     input  wire                  refresh_active,
@@ -53,6 +54,8 @@ module media_frame_loader #(
     reg commit_seen;
     reg [31:0] pixels_received;
     reg [31:0] pixels_written;
+    // 640x480=307200=20'h4B000. Counts stop on error until the next load.
+    assign debug_writer_status={memory_error,pixels_received[19:0],pixels_written[19:0]};
     // BMP bottom-up: stream row 0 belongs to the last display row.
     // Advance only when a command is generated, so stalls cannot shift pixels.
     reg [ADDR_WIDTH-1:0] write_offset;

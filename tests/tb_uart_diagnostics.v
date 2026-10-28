@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
-    localparam LENGTH=COMPACT_LOG ? 47 : 230;
+    localparam LENGTH=COMPACT_LOG ? 71 : 230;
     reg clk=0, src_clk=0, rst=1, logger_rst=1;
     always #5 clk=~clk;
     always #3 src_clk=~src_clk;
@@ -16,6 +16,7 @@ module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
     reg [31:0] cluster=32'h102;
     reg [63:0] pipeline=64'h0123456789abcdef;
     reg [63:0] playlist=64'h03ff03ff0a06070f;
+    reg [47:0] writer_status=48'h454afff4affe;
     wire [95:0] mailbox;
     wire ready;
     subtitle_frame_commit commit (
@@ -32,7 +33,8 @@ module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
         .sd_cmd_error_latched(1'b0), .resource_valid(picture_mask), .image_count(picture_count),
         .root_crc(root_crc), .root_bytes(root_bytes), .accepted_cluster(scanned_cluster), .pcm_status(pcm_status), .sector_done_count(16'h77b),
         .load_image_number(5'd2), .load_cluster(cluster), .load_size(32'd921654),
-        .load_pipeline(pipeline), .playlist_snapshot(mailbox[63:0]), .tx(tx)
+        .load_pipeline(pipeline), .playlist_snapshot(mailbox[63:0]), .tx(tx),
+        .writer_status(writer_status)
     );
     uart_rx #(.CLOCK_FREQ_HZ(1_000_000), .BAUD_RATE(100_000)) receiver (
         .clk(clk), .rst(logger_rst), .rx(tx), .rx_data(received_byte), .rx_valid(valid)
@@ -44,6 +46,7 @@ module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
         if(received==10 && lines==0) begin
             cluster=32'hdeadbeef; pipeline=0; playlist=64'hfffefffe0f10e1a5;
             picture_mask=0; picture_count=0; root_crc=0; root_bytes=0; pcm_status=0; scanned_cluster=0;
+            writer_status=48'h004b0004b000;
         end // Current UART line must remain unchanged while source data updates.
         if(received==LENGTH) begin
             lines=lines+1;
@@ -53,11 +56,11 @@ module tb_uart_diagnostics #(parameter COMPACT_LOG=0);
             end
             received=0;
             expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 S=0 A=0 L=0000358E C=1FF Q=11 X=0 F=0 N=077B R=00 J=02 K=DEADBEEF Z=000E1036 H=0000000000000000 M=0000 U=00 W=00000000 Y=0000 O=0000000000000000000000000000000000000000 G=00000000 PL=FFFEFFFE0F10E1A5",8'h0d,8'h0a};
-            if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=0000 U=00 J=02",8'h0d,8'h0a};
+            if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=0000 U=00 J=02 WR=00 RX=4B000 WX=4B000",8'h0d,8'h0a};
         end
     end
     initial begin
-        if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=03FF U=0A J=02",8'h0d,8'h0a};
+        if(COMPACT_LOG) expected={"P=1 I=1 T=F B=0 D=1 E=25 V=1 M=03FF U=0A J=02 WR=45 RX=4AFFF WX=4AFFE",8'h0d,8'h0a};
         repeat(10) @(negedge clk); rst=0;
         repeat(20) @(negedge clk); logger_rst=0;
     end

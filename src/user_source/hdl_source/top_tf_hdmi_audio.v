@@ -279,6 +279,9 @@ wire        writer_load_busy;
 wire        writer_load_done;
 wire [3:0]  writer_image_complete;
 wire [7:0]  writer_memory_error;
+wire [47:0] writer_debug_status;
+wire [95:0] writer_debug_uart;
+wire writer_debug_ready;
 wire        writer_app_wr_en_src;
 wire [ADDR_BITS-1:0] writer_app_wr_addr_src;
 wire [3:0]  writer_app_wr_mask_src;
@@ -571,6 +574,15 @@ subtitle_frame_commit u_playlist_debug_commit (
     .dst_text(debug_playlist_uart), .dst_length(), .dst_enable()
 );
 
+// Transfer error and both pixel counters together; no torn multi-bit UART read.
+subtitle_frame_commit u_writer_debug_commit (
+    .src_clk(sd_card_clk), .src_rst_n(~rst_all),
+    .src_commit(writer_debug_ready), .src_ready(writer_debug_ready),
+    .src_text({48'd0,writer_debug_status}), .src_length(6'd0), .src_enable(1'b1),
+    .dst_clk(clk), .dst_rst_n(~rst_all), .frame_start(1'b1),
+    .dst_text(writer_debug_uart), .dst_length(), .dst_enable()
+);
+
 uart_debug_logger #(
     .CLOCK_FREQ_HZ   (50_000_000),
     .BAUD_RATE       (115_200),
@@ -605,6 +617,7 @@ uart_debug_logger #(
     .load_pipeline(debug_load_pipeline),
     .playlist_snapshot(debug_playlist_uart[63:0]),
     .pcm_status(debug_pcm_status),
+    .writer_status(writer_debug_uart[47:0]),
     .tx             (uart_txd)
 );
 
@@ -908,6 +921,7 @@ media_frame_loader #(
     .load_done            (writer_load_done),
     .image_complete       (writer_image_complete),
     .memory_error         (writer_memory_error),
+    .debug_writer_status  (writer_debug_status),
     .controller_init_done (Sdr_init_done),
     .controller_busy      (Sdr_busy),
     .refresh_active       (Sdr_init_ref_vld),

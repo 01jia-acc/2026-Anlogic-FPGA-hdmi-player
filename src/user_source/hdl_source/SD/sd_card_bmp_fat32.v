@@ -289,7 +289,8 @@ module sd_card_bmp_fat32 #(
     // 双向邮箱确认像素域已切到所请求的帧之后，才允许复用旧显示bank。
     wire display_settled = display_ack_valid && display_ack_bank == disp_buf_idx &&
                            display_ack_image_id == img_idx;
-    wire auto_tick = auto_cnt == CLK_FREQ_HZ - 1;
+    // Request the next image after three seconds of settled display.
+    wire auto_tick = auto_cnt == 3 * CLK_FREQ_HZ - 1;
     wire [3:0] next_idx = {1'b0,img_idx} + 5'd1 >= img_found_count ? 4'd0 : img_idx + 1'b1;
     wire [3:0] prev_idx = img_idx == 0 ? img_found_count - 1'b1 : img_idx - 1'b1;
     // 没有按键请求时也查询下一张，供后台预读使用；手动请求优先。

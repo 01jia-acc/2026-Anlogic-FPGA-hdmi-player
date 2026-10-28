@@ -36,6 +36,7 @@ module uart_debug_logger #(
     input wire [31:0] accepted_cluster,
     input wire [63:0] load_pipeline,
     input wire [159:0] pcm_status,
+    input wire [47:0] writer_status, // coherent error / received / written counters
     input wire [63:0] playlist_snapshot, // Coherent SD-to-UART mailbox snapshot.
     output wire       tx
 );
@@ -50,7 +51,8 @@ module uart_debug_logger #(
     // O: PCM mask/flags/image/slot/error/cluster/size/consumed samples/current sample.
     // PL: coherent playlist mailbox, retaining mask/count/current/physical-file/cache flags.
     // G: first cluster actually accepted by the image file source (compare K).
-    localparam integer MESSAGE_LENGTH = COMPACT_LOG ? 47 : 230;
+    // Compact adds WR (writer error), RX/WX (20-bit pixel counts, hex).
+    localparam integer MESSAGE_LENGTH = COMPACT_LOG ? 71 : 230;
     localparam integer INTERVAL_BITS = LOG_INTERVAL_CYCLES<2 ? 1 : $clog2(LOG_INTERVAL_CYCLES);
 
     reg [INTERVAL_BITS-1:0] interval_count;
@@ -83,6 +85,7 @@ module uart_debug_logger #(
     reg [31:0] snap_accepted_cluster;
     reg [63:0] snap_load_pipeline;
     reg [159:0] snap_pcm_status;
+    reg [47:0] snap_writer_status;
     reg [63:0] snap_playlist;
 
     wire       tx_busy;
@@ -139,7 +142,22 @@ module uart_debug_logger #(
                     41: message_byte="J"; 42: message_byte="=";
                     43: message_byte=hex_symbol({3'd0,snap_load_image_number[4]});
                     44: message_byte=hex_symbol(snap_load_image_number[3:0]);
-                    45: message_byte=8'h0d; 46: message_byte=8'h0a;
+                    46: message_byte="W"; 47: message_byte="R"; 48: message_byte="=";
+                    49: message_byte=hex_symbol(snap_writer_status[47:44]);
+                    50: message_byte=hex_symbol(snap_writer_status[43:40]);
+                    52: message_byte="R"; 53: message_byte="X"; 54: message_byte="=";
+                    55: message_byte=hex_symbol(snap_writer_status[39:36]);
+                    56: message_byte=hex_symbol(snap_writer_status[35:32]);
+                    57: message_byte=hex_symbol(snap_writer_status[31:28]);
+                    58: message_byte=hex_symbol(snap_writer_status[27:24]);
+                    59: message_byte=hex_symbol(snap_writer_status[23:20]);
+                    61: message_byte="W"; 62: message_byte="X"; 63: message_byte="=";
+                    64: message_byte=hex_symbol(snap_writer_status[19:16]);
+                    65: message_byte=hex_symbol(snap_writer_status[15:12]);
+                    66: message_byte=hex_symbol(snap_writer_status[11:8]);
+                    67: message_byte=hex_symbol(snap_writer_status[7:4]);
+                    68: message_byte=hex_symbol(snap_writer_status[3:0]);
+                    69: message_byte=8'h0d; 70: message_byte=8'h0a;
                     default: message_byte=" ";
                 endcase
             end else begin
@@ -429,6 +447,7 @@ module uart_debug_logger #(
             snap_load_image_number<=0; snap_load_cluster<=0; snap_load_size<=0;
             snap_load_pipeline<=0;
             snap_pcm_status<=0; snap_playlist<=0;
+            snap_writer_status<=0;
             snap_accepted_cluster<=0; byte_settle<=0;
         end else begin
             // tx_start 是送给 uart_tx 的寄存器脉冲。由于两个 always 块在同一
@@ -467,6 +486,7 @@ module uart_debug_logger #(
                     snap_load_cluster<=load_cluster; snap_load_size<=load_size;
                     snap_load_pipeline<=load_pipeline;
                     snap_pcm_status<=pcm_status; snap_playlist<=playlist_snapshot;
+                    snap_writer_status<=writer_status;
                     snap_accepted_cluster<=accepted_cluster;
                     byte_settle<=4;
                     message_index      <= 8'd0;
