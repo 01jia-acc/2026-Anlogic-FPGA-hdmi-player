@@ -7,7 +7,7 @@ set project_path [file join $repo_root src td_project lab_ex5_i2s_v1.0.al]
 set project_handle [open $project_path r]
 set project_text [read $project_handle]
 close $project_handle
-foreach source {audio/pcm_stream_buffer.v audio/pcm_test_tone.v audio/pcm_media_tone.v audio/media_hdmi_audio_bridge.v SD/media_display_commit.v SD/sd_card_bmp_fat32.v SD/media_frame_loader.v SD/media_frame_reader.v SD/media_sdram_write_cdc.v SD/promax_audio_waveform.v} {
+foreach source {audio/pcm_stream_buffer.v audio/pcm_test_tone.v audio/pcm_media_tone.v audio/media_hdmi_audio_bridge.v SD/media_display_commit.v SD/media_pcm_selection.v SD/sd_card_bmp_fat32.v SD/media_frame_loader.v SD/media_frame_reader.v SD/media_sdram_write_cdc.v SD/promax_audio_waveform.v} {
     if {[string first "$source" $project_text] < 0} {
         error "Missing integration source in project: $source. Reload the updated .al in TD."
     }

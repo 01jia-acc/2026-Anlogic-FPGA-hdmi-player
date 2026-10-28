@@ -6,6 +6,7 @@ module media_hdmi_audio_bridge #(
     parameter integer CLOCK_HZ = 25_000_000,
     parameter integer TEST_ONLY = 0,
     parameter integer PCM_ENABLE = 0,
+    parameter integer INDEPENDENT_PCM_COMMIT = 0,
     parameter [7:0] VOLUME = 8'd192,
     parameter integer DYNAMIC_VOLUME = 0,
     parameter integer BLIP_SAMPLES = 4800,
@@ -20,9 +21,11 @@ module media_hdmi_audio_bridge #(
     input wire pcm_active, pcm_valid,
     input wire pcm_mode_sd,
     input wire pcm_commit_ack_sd,
+    input wire pcm_request_toggle_pix,
     input wire signed [15:0] stream_sample,
     output wire pcm_ready,
     output reg         audio_valid,
+    output reg         arpeggio_active, // source tag aligned with actual HDMI samples
     output reg  [23:0] audio_left_data,
     output reg  [23:0] audio_right_data,
     output reg         acr_valid,
@@ -84,7 +87,8 @@ module media_hdmi_audio_bridge #(
             pcm_ack_sync <= {pcm_ack_sync[0],pcm_commit_ack_sd};
         end
     wire pcm_selected = PCM_ENABLE && !TEST_ONLY && pcm_mode_sync[1];
-    wire use_pcm = pcm_selected && pcm_active && pcm_ack_sync[1]==commit_toggle_sd;
+    wire pcm_expected_commit=INDEPENDENT_PCM_COMMIT ? pcm_request_toggle_pix : commit_toggle_sd;
+    wire use_pcm = pcm_selected && pcm_active && pcm_ack_sync[1]==pcm_expected_commit;
     assign pcm_ready = sample_tick && use_pcm;
     // PCM模式缺文件、换音或欠载时静音，不自动回退琶音或测试音。
     wire signed [15:0] selected_sample = pcm_selected ? (use_pcm && pcm_valid ? stream_sample : 16'sd0) :
@@ -141,6 +145,7 @@ module media_hdmi_audio_bridge #(
         if (rst) begin
             rate_accumulator <= 0;
             audio_valid <= 1'b0;
+            arpeggio_active <= 1'b0;
             audio_left_data <= 24'd0;
             audio_right_data <= 24'd0;
             acr_sample_count <= 6'd0;
@@ -149,6 +154,7 @@ module media_hdmi_audio_bridge #(
             audio_valid <= sample_tick;
             acr_valid <= 1'b0;
             if (sample_tick) begin
+                arpeggio_active <= use_media && !pcm_selected;
                 rate_accumulator <= rate_accumulator - RATE_LIMIT;
                 // Left-align signed 16-bit PCM into the core's 24-bit word.
                 audio_left_data <= {pcm_sample, 8'd0};

@@ -166,6 +166,8 @@ wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
 wire pcm_commit_ack;
+wire pcm_selection_toggle;
+wire [3:0] pcm_selected_image_id;
 wire [3:0] pcm_file_number_pix;
 (* ASYNC_REG = "TRUE" *) reg [1:0] subtitle_pcm_mode_sync, subtitle_pcm_ack_sync;
 wire subtitle_file_selected;
@@ -232,6 +234,7 @@ wire        display_commit_toggle;
 reg         video_read_req_d;
 
 wire        audio_valid;
+wire        arpeggio_active;
 wire [23:0] audio_left_data, audio_right_data;
 wire        acr_valid;
 wire [19:0] acr_cts, acr_n;
@@ -367,7 +370,15 @@ always @(posedge video_clk or posedge rst_all)
         subtitle_pcm_ack_sync<={subtitle_pcm_ack_sync[0],pcm_commit_ack};
     end
 assign subtitle_file_selected=video_display_valid && pcm_file_number_pix>=2 && pcm_file_number_pix<=10 &&
-    subtitle_pcm_ack_sync[1]==display_commit_toggle;
+    subtitle_pcm_ack_sync[1]==pcm_selection_toggle;
+
+media_pcm_selection u_pcm_selection (
+    .pixel_clk(video_clk), .rst(rst_all),
+    .pcm_mode_sd(pcm_mode), .auto_play_sd(osd_auto_sd),
+    .display_valid_pix(video_display_valid), .display_commit_toggle(display_commit_toggle),
+    .display_image_id_pix(video_image_id), .pcm_image_id_pix(pcm_selected_image_id),
+    .pcm_commit_toggle(pcm_selection_toggle)
+);
 
 // 图片选择在 SD 时钟域产生；只在下一次视频读帧请求到来时提交。
 // read_req 是保持到 ack 的电平，因此只取上升沿，防止一帧内重复改地址。
@@ -468,7 +479,7 @@ sd_card_bmp_fat32 #(
     .pcm_valid(pcm_stream_valid), .pcm_active(pcm_stream_active),
     .pcm_end(), .pcm_underflow(), .pcm_error(pcm_stream_error),
     .pcm_mode(pcm_mode),
-    .pcm_image_id_pix(video_image_id), .pcm_commit_toggle_pix(display_commit_toggle),
+    .pcm_image_id_pix(pcm_selected_image_id), .pcm_commit_toggle_pix(pcm_selection_toggle),
     .pcm_commit_ack(pcm_commit_ack),
     .pcm_file_number_pix(pcm_file_number_pix),
     .clk               (sd_card_clk),          // 输入：SD 卡/BMP 控制时钟
@@ -825,8 +836,8 @@ volume_status_osd #(.OSD_X(376), .LABEL("CON"), .LEVEL_BITS(6), .DEFAULT_LEVEL(2
     .level(contrast_level_pix), .adjust_mode(osd_sd_snapshot[56]),
     .rgb_in(brightness_osd_rgb), .rgb_out(contrast_osd_rgb)
 );
-// Lesson waveform above the subtitle band (starts at y=438). Listen to the
-// exact post-gain HDMI samples, including arpeggios and PCM silence/underflow.
+// Waveform above subtitles (y=438): PCM envelope or arpeggio frequency curve.
+// Both use exact post-gain HDMI samples, including PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
 wire opening_active;
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
@@ -834,6 +845,7 @@ promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : contrast_osd_rgb),
     .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23] && !opening_active),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
+    .arpeggio_mode(arpeggio_active),
     .rgb_out(waveform_rgb), .out_vs(waveform_vs), .out_de(waveform_de),
     .out_x(waveform_x), .out_y(waveform_y), .frame_start_out(waveform_frame_start),
     .waveform_active()
@@ -848,7 +860,7 @@ scrolling_subtitle #(.FILE_SUBTITLE_ENABLE(1), .INTRO_ENABLE(1)) u_scrolling_sub
     .intro_active(opening_active),
     .file_track(pcm_file_number_pix-4'd2),
     .file_selected(subtitle_file_selected), .file_show(subtitle_pcm_mode_sync[1]),
-    .file_commit_toggle(display_commit_toggle),
+    .file_commit_toggle(pcm_selection_toggle),
     .file_sample_accept(pcm_stream_ready && pcm_stream_valid),
     .in_vs(waveform_vs), .in_de(waveform_de), .pixel_x(waveform_x), .pixel_y(waveform_y),
     .rgb_in(waveform_rgb), .out_vs(subtitle_vs), .out_de(subtitle_de),
@@ -1055,6 +1067,7 @@ startup_pulse #(
 // The bridge's existing input synchronizers also accept same-clock signals.
 media_hdmi_audio_bridge #(
     .PCM_ENABLE(AUDIO_PCM_ENABLE),
+    .INDEPENDENT_PCM_COMMIT(1),
     .DYNAMIC_VOLUME(1),
     .CLOCK_HZ(25_000_000), .TEST_ONLY(AUDIO_TEST_ONLY), .VOLUME(AUDIO_VOLUME)
 ) u_media_hdmi_audio_bridge (
@@ -1062,11 +1075,13 @@ media_hdmi_audio_bridge #(
     .pcm_active(pcm_stream_active), .pcm_valid(pcm_stream_valid),
     .pcm_mode_sd(pcm_mode),
     .pcm_commit_ack_sd(pcm_commit_ack),
+    .pcm_request_toggle_pix(pcm_selection_toggle),
     .stream_sample(pcm_stream_sample), .pcm_ready(pcm_stream_ready),
     .pixel_clk(video_clk), .rst(rst_all),
     .display_valid_sd(video_display_valid), .media_id_sd(video_image_id[1:0]),
     .commit_toggle_sd(display_commit_toggle),
     .audio_valid(audio_valid), .audio_left_data(audio_left_data),
+    .arpeggio_active(arpeggio_active),
     .audio_right_data(audio_right_data), .acr_valid(acr_valid),
     .acr_cts(acr_cts), .acr_n(acr_n)
 );

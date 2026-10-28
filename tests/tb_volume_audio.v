@@ -4,7 +4,7 @@ module tb_volume_audio;
     always #5 clk=~clk;
     reg [4:0] level=15;
     reg signed [15:0] sample=32767;
-    wire av,ready,acr;
+    wire av,ready,acr,arpeggio_active;
     wire [23:0] left,right;
     wire [19:0] cts,n;
     media_hdmi_audio_bridge #(.CLOCK_HZ(480000), .PCM_ENABLE(1), .DYNAMIC_VOLUME(1)) dut (
@@ -13,14 +13,16 @@ module tb_volume_audio;
         .pcm_active(1'b1), .pcm_valid(1'b1), .pcm_mode_sd(pcm_mode),
         .pcm_commit_ack_sd(commit), .stream_sample(sample), .pcm_ready(ready),
         .audio_valid(av), .audio_left_data(left), .audio_right_data(right),
+        .arpeggio_active(arpeggio_active),
         .acr_valid(acr), .acr_cts(cts), .acr_n(n));
     integer gain=192,target,expected,cycle=0,count=0,ready_count=0;
-    reg tick;
+    reg tick,expected_source;
     always @(posedge clk) begin
         if(rst) begin gain=192; cycle=0; count=0; ready_count=0; end
         else begin
             cycle=cycle+1; tick=(cycle%10==0);
             expected=($signed(dut.selected_sample)*gain) >>> 8;
+            expected_source=dut.use_media && !dut.pcm_selected;
             if(ready) ready_count=ready_count+1;
             if(tick) begin
                 count=count+1;
@@ -30,6 +32,7 @@ module tb_volume_audio;
             end
             #1;
             if(av!==tick) $fatal(1,"48kHz cadence changed");
+            if(tick && arpeggio_active!==expected_source) $fatal(1,"Waveform source tag must align with HDMI sample");
             if(acr!==(tick && count%48==0) || cts!=480 || n!=6144) $fatal(1,"ACR changed");
             if(tick && ($signed(left[23:8])!==expected || left!==right || left[7:0]!=0))
                 $fatal(1,"Gain arithmetic/slew got %0d expected %0d at level %0d",$signed(left[23:8]),expected,level);

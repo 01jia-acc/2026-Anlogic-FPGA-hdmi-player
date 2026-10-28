@@ -55,7 +55,7 @@ module tb_waveform_axis #(parameter BRIGHTNESS_TEST=0);
     wire [23:0] wrgb,srgb,data;
     promax_audio_waveform #(.WAVE_Y(368)) wave(
         .clk(clk),.rst_n(!rst),.vsync(vs),.de(de),.rgb_in(picture_rgb),
-        .pixel_x(x),.pixel_y(y),.enable(enable),.pcm_tap_valid(av),.pcm_tap_left(left[23:8]),
+        .pixel_x(x),.pixel_y(y),.enable(enable),.arpeggio_mode(1'b0),.pcm_tap_valid(av),.pcm_tap_left(left[23:8]),
         .rgb_out(wrgb),.out_vs(wvs),.out_de(wde),.out_x(wx),.out_y(wy),
         .frame_start_out(wframe),.waveform_active());
     scrolling_subtitle subtitle(.control_clk(clk),.pixel_clk(clk),.rst(rst),

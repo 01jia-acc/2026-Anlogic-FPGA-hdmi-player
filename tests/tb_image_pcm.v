@@ -1,15 +1,18 @@
 `timescale 1ns/1ps
 // Real FAT scan/stream/FIFO, actual video commit including wipe, and HDMI samples.
 // Only the physical SPI card and SDRAM frame storage are replaced.
-module tb_image_pcm;
+module tb_image_pcm #(parameter AUTO_TEST=0, FIRST_PIC=1, FIRST_AUDIO_MISSING=0);
     reg clk=0, pixel_clk=0, rst=1;
     always #5 clk=~clk;
     always #13 pixel_clk=~pixel_clk;
     reg scan=0, allow_play=1, mode=1, load=0;
     reg request_valid=0, frame=0;
+    reg auto_play=0;
     reg [3:0] request_image=0;
     wire video_valid, commit_toggle, ack, active, valid, ready, scan_done, image_done;
     wire [3:0] video_image;
+    wire [3:0] pcm_image;
+    wire pcm_toggle;
     wire [7:0] error, image_error;
     wire signed [15:0] sample;
     wire [159:0] pcm_diagnostic;
@@ -30,34 +33,40 @@ module tb_image_pcm;
         .pixel_clk(pixel_clk),.frame_request(frame),.display_valid_pix(video_valid),
         .display_image_id_pix(video_image),.audio_commit_toggle(commit_toggle),.wipe_active_pix(wipe)
     );
+    media_pcm_selection selection (
+        .pixel_clk(pixel_clk),.rst(rst),.pcm_mode_sd(mode),.auto_play_sd(auto_play),
+        .display_valid_pix(video_valid),.display_image_id_pix(video_image),
+        .display_commit_toggle(commit_toggle),.pcm_image_id_pix(pcm_image),.pcm_commit_toggle(pcm_toggle)
+    );
     sd_fat32_image_source #(.PCM_ENABLE(1),.PCM_FIFO_ADDR_WIDTH(9),
         .DISPLAY_WIDTH(4),.DISPLAY_HEIGHT(4)) dut (
         .clk(clk),.rst(rst),.pixel_clk(pixel_clk),.pcm_ready(ready),
-        .pcm_image_id_pix(video_image),.pcm_commit_toggle_pix(commit_toggle),.pcm_commit_ack(ack),
+        .pcm_image_id_pix(pcm_image),.pcm_commit_toggle_pix(pcm_toggle),.pcm_commit_ack(ack),
         .pcm_play_enable(allow_play),.pcm_sample(sample),.pcm_valid(valid),.pcm_active(active),
         .pcm_error(error),.scan_start(scan),.scan_done(scan_done),
         .load_start(load),.load_abort(1'b0),.load_cluster(32'd205),.load_size(32'd102),
         .write_req_ack(1'b1),.SD_MISO(1'b1),.load_done(image_done),.load_error(image_error),
         .debug_pcm_status(pcm_diagnostic)
     );
-    media_hdmi_audio_bridge #(.CLOCK_HZ(4_800_000),.PCM_ENABLE(1),.VOLUME(128)) bridge (
+    media_hdmi_audio_bridge #(.CLOCK_HZ(4_800_000),.PCM_ENABLE(1),.VOLUME(128),.INDEPENDENT_PCM_COMMIT(1)) bridge (
         .pixel_clk(pixel_clk),.rst(rst),.display_valid_sd(video_valid),
         .media_id_sd(video_image[1:0]),.commit_toggle_sd(commit_toggle),.pcm_mode_sd(mode),
         .pcm_commit_ack_sd(ack),.pcm_active(active),.pcm_valid(valid),.stream_sample(sample),
+        .pcm_request_toggle_pix(pcm_toggle),
         .pcm_ready(ready),.audio_valid(av),.audio_left_data(left),.audio_right_data(right)
     );
     function integer file_number;
         input integer logical_id;
         begin
             case(logical_id)
-                0:file_number=1; 1:file_number=5; 2:file_number=7;
+                0:file_number=FIRST_PIC; 1:file_number=5; 2:file_number=7;
                 3:file_number=8; 4:file_number=9; default:file_number=10;
             endcase
         end
     endfunction
     function integer samples;
         input integer number;
-        begin samples=number==1 ? 1300 : number==10 ? 257 : number==7 ? 7 : number+2; end
+        begin samples=number==FIRST_PIC ? 1300 : number==10 ? 257 : number==7 ? 7 : number+2; end
     endfunction
     function [15:0] pattern;
         input integer number,index;
@@ -116,7 +125,7 @@ module tb_image_pcm;
         for(i=1;i<=16;i=i+1) begin
             c=32+(i-1)*8; sz=samples(i);
             entry(10*512+(i-1)*32,audio_name(i),c,sz*2);
-            if(i==5) disk[10*512+(i-1)*32]=8'he5; // Missing match.
+            if(i==5 || (FIRST_AUDIO_MISSING && i==FIRST_PIC)) disk[10*512+(i-1)*32]=8'he5;
             if(i==8) put32(10*512+(i-1)*32+28,0); // Empty file.
             if(i==9) put32(10*512+(i-1)*32+28,3); // Odd length.
             for(n=0;n<(sz+255)/256;n=n+1) begin
@@ -129,7 +138,8 @@ module tb_image_pcm;
                 end
             end
         end
-        entry(12*512,"AUDIO1  PCM",220,2); // Duplicate: first wins.
+        if(!(FIRST_AUDIO_MISSING && FIRST_PIC==1)) entry(12*512,"AUDIO1  PCM",220,2); // Duplicate: first wins.
+        else disk[12*512]=8'he5;
         entry(12*512+32,"AUDIO17 PCM",220,2);
         entry(12*512+64,"AUDIO01 PCM",220,2);
         entry(12*512+96,"AUDIO0  PCM",220,2);
@@ -139,15 +149,20 @@ module tb_image_pcm;
         force dut.sd_sec_read_end=card_end;
         repeat(8) @(negedge clk); rst=0; scan=1;
         @(negedge clk); scan=0; wait(scan_done);
-        if(dut.resource_valid!==16'h03d1 || dut.audio_resource_valid!==16'h03ef)
+        if(dut.resource_valid!==(16'h03d0 | (16'h0001 << (FIRST_PIC-1))) ||
+           dut.audio_resource_valid!==(16'h03ef & ~(FIRST_AUDIO_MISSING ? (16'h0001 << (FIRST_PIC-1)) : 16'h0000)))
             $fatal(1,"Numbered/sparse metadata mask mismatch pic=%h audio=%h",dut.resource_valid,dut.audio_resource_valid);
-        for(i=0;i<10;i=i+1) if(i!=4) begin
+        for(i=0;i<10;i=i+1) if(i!=4 && !(FIRST_AUDIO_MISSING && i==FIRST_PIC-1)) begin
             if(dut.u_volume_scanner.g_audio_ram.metadata[i][63:32]!==32+i*8)
                 $fatal(1,"Wrong numbered metadata slot %0d",i);
         end
         repeat(3000) @(negedge clk);
         if(active || dut.audio_running) $fatal(1,"Audio began before first actual frame");
         request_valid=1; present(0);
+        if(AUTO_TEST) begin
+            run_auto_test;
+            $finish;
+        end
         wait(received>=1300*2+100);
         @(negedge pixel_clk); // Observe after the accepted sample's NBA updates.
         if(pcm_diagnostic[159:144]!==16'h03ef ||
@@ -168,7 +183,7 @@ module tb_image_pcm;
         // Commit while an old PCM sector is in flight; it must drain safely.
         wait(dut.sector_owner==2 && card_index>100 && card_index<400);
         present(1); // PIC5 has no AUDIO5: silence even during wipe.
-        wait(dut.audio_switch_state==0 && dut.audio_commit_seen==commit_toggle);
+        wait(dut.audio_switch_state==0 && dut.audio_commit_seen==pcm_toggle);
         repeat(3000) @(negedge pixel_clk);
         if(active || error!=0 || received!=0) $fatal(1,"Missing file is not silent");
         end_wipe;
@@ -194,13 +209,81 @@ module tb_image_pcm;
         wait(dut.sector_owner==2 && card_index>100 && card_index<400);
         @(negedge clk); card_hold=1;
         end_wipe; present(1); end_wipe; present(5);
-        if(dut.audio_switch_state!=1 || dut.audio_commit_seen!=commit_toggle || active)
+        if(dut.audio_switch_state!=1 || dut.audio_commit_seen!=pcm_toggle || active)
             $fatal(1,"Rapid commits did not wait for the stalled old sector safely");
         @(negedge clk); card_hold=0;
         wait(received>=600);
         $display("PASS: per-image PCM, ten numbered slots, sparse PIC mapping, no legacy fallback, actual frame/wipe commit, prefetch isolation, fragmented loops, atomic clear, missing/invalid silence, revisit from zero, mode pause, rapid commits, HDMI samples (%0d total)",total);
         $finish;
     end
+    task run_auto_test;
+        integer saved_epoch, saved_samples, next_image;
+        begin
+            end_wipe;
+            present(2);end_wipe;wait(received>=40); // AUDIO7 before slideshow.
+            // Enter during an old file-sector transfer: drain and clear safely.
+            wait(dut.sector_owner==2 && card_index>100 && card_index<400);
+            saved_epoch=epoch;
+            @(negedge pixel_clk);auto_play=1;
+            repeat(20) @(negedge pixel_clk);
+            if(pcm_image!=0 || epoch!=saved_epoch+1) $fatal(1,"Auto PCM must select first image exactly once");
+            wait(dut.audio_switch_state==0 && dut.audio_commit_seen==pcm_toggle);
+            if(FIRST_AUDIO_MISSING) begin
+                repeat(5000) @(negedge pixel_clk);
+                if(active || received!=0 || error!=0) $fatal(1,"Missing first soundtrack must stay silent");
+            end else wait(received>=2700); // More than two complete loops.
+            saved_epoch=epoch;saved_samples=received;
+            // Include an image with invalid audio, last image and wrap to first.
+            for(next_image=0;next_image<4;next_image=next_image+1) begin
+                present(next_image==0 ? 3 : next_image==1 ? 5 : next_image==2 ? 0 : 2);
+                end_wipe;
+                repeat(2000) @(negedge pixel_clk);
+                if(pcm_image!=0 || epoch!=saved_epoch) $fatal(1,"Slideshow image change restarted soundtrack");
+                if(!FIRST_AUDIO_MISSING && received<=saved_samples) $fatal(1,"Slideshow stopped PCM consumption");
+                if(FIRST_AUDIO_MISSING && (active || received!=0)) $fatal(1,"Missing first track fell back after picture change");
+                saved_samples=received;
+            end
+            // Turning auto off resumes the displayed picture's own file from zero.
+            @(negedge pixel_clk);auto_play=0;
+            repeat(20) @(negedge pixel_clk);
+            if(pcm_image!=2 || epoch!=saved_epoch+1) $fatal(1,"Auto OFF must select displayed image");
+            wait(received>=30);
+            // Auto alone must not lock the arpeggio or change its displayed image.
+            @(negedge pixel_clk);mode=0;
+            repeat(30) @(negedge pixel_clk);
+            saved_epoch=epoch;
+            auto_play=1;repeat(30) @(negedge pixel_clk);
+            if(epoch!=saved_epoch || pcm_image!=2) $fatal(1,"Arpeggio auto incorrectly selected first track");
+            present(5);end_wipe;
+            wait(active && dut.audio_switch_state==0);
+            repeat(3000) @(negedge pixel_clk);
+            if(pcm_image!=5 || received!=0 || bridge.media_id!=video_image[1:0])
+                $fatal(1,"Arpeggio must follow images without consuming PCM");
+            // Switching back to PCM while auto remains ON chooses first audio.
+            @(negedge pixel_clk);mode=1;
+            repeat(30) @(negedge pixel_clk);
+            if(pcm_image!=0) $fatal(1,"PCM ON with auto ON did not select first track");
+            wait(dut.audio_switch_state==0 && dut.audio_commit_seen==pcm_toggle);
+            if(FIRST_AUDIO_MISSING) begin
+                repeat(3000) @(negedge pixel_clk);
+                if(active || received!=0) $fatal(1,"Missing track fallback after mode switch");
+            end else wait(received>=100);
+            // Leaving the combined mode while a sector is stalled, then entering
+            // again, must retain the latest request and avoid old PCM bytes.
+            @(negedge pixel_clk);auto_play=0;
+            repeat(30) @(negedge pixel_clk);
+            wait(received>=40);
+            wait(dut.sector_owner==2 && card_index>100 && card_index<400);
+            @(negedge clk);card_hold=1;
+            @(negedge pixel_clk);auto_play=1;
+            repeat(50) @(negedge pixel_clk);
+            auto_play=0;repeat(50) @(negedge pixel_clk);
+            if(pcm_image!=5) $fatal(1,"Rapid mode changes lost latest selection");
+            @(negedge clk);card_hold=0;
+            wait(received>=600);
+            $display("PASS: PCM slideshow first PIC%0d audio (missing=%0d), continuous samples/loops across wipe/wrap, auto entry/exit, source switch, sparse mapping, missing silence, rapid pending changes",FIRST_PIC,FIRST_AUDIO_MISSING);
+        end
+    endtask
     task frame_pulse;
         begin
             @(negedge pixel_clk); frame=1;
@@ -235,17 +318,17 @@ module tb_image_pcm;
     end
     always @(posedge pixel_clk) begin
         if(!rst) begin
-            if(commit_toggle!=last_commit) begin
-                received=0; epoch=epoch+1; last_commit=commit_toggle;
+            if(pcm_toggle!=last_commit) begin
+                received=0; epoch=epoch+1; last_commit=pcm_toggle;
             end
             was_selected=bridge.pcm_selected; was_pcm=bridge.use_pcm;
             was_valid=valid;
             if(ready && valid) begin
-                if(dut.pcm_file_number_pix!==file_number(video_image))
+                if(dut.pcm_file_number_pix!==file_number(pcm_image))
                     $fatal(1,"Committed PCM file number does not match sparse image mapping");
-                if(video_image==1 || video_image==3 || video_image==4)
+                if(pcm_image==1 || pcm_image==3 || pcm_image==4 || (FIRST_AUDIO_MISSING && pcm_image==0))
                     $fatal(1,"Audio emitted for missing/invalid track");
-                if(sample!==pattern(file_number(video_image),received%samples(file_number(video_image))))
+                if(sample!==pattern(file_number(pcm_image),received%samples(file_number(pcm_image))))
                     $fatal(1,"Old/wrong/reordered sample epoch=%0d image=%0d index=%0d got=%h",epoch,video_image,received,sample);
                 expected_hdmi=$signed(sample)>>>1;
                 received=received+1; total=total+1;

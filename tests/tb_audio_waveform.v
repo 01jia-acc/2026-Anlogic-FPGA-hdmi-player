@@ -10,7 +10,7 @@ module tb_audio_waveform;
     wire [11:0] ox,oy;
     promax_audio_waveform #(.WAVE_Y(368)) dut(
         .clk(clk),.rst_n(rst_n),.vsync(vs),.de(de),.rgb_in(rgb),
-        .pixel_x(x),.pixel_y(y),.enable(enable),.pcm_tap_valid(tap_valid),
+        .pixel_x(x),.pixel_y(y),.enable(enable),.arpeggio_mode(1'b0),.pcm_tap_valid(tap_valid),
         .pcm_tap_left(sample),.rgb_out(out_rgb),.out_vs(out_vs),.out_de(out_de),
         .out_x(ox),.out_y(oy),.waveform_active(hit),.frame_start_out(frame));
     task boundary;

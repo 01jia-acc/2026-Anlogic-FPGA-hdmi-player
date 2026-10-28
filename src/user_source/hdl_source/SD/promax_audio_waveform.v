@@ -1,5 +1,6 @@
 `timescale 1ns/1ps
-// 32 chronological envelope columns: oldest left, newest right.
+// PCM: 32 chronological envelope columns, oldest left and newest right.
+// Arpeggio: triggered fixed-time waveform, higher pitch gives denser cycles.
 // Tap the HDMI bridge AFTER gain/source selection, in the pixel clock domain.
 // Two registered video stages keep the synchronous sample RAM aligned with RGB.
 module promax_audio_waveform #(
@@ -15,6 +16,7 @@ module promax_audio_waveform #(
     input wire [23:0] rgb_in,
     input wire [11:0] pixel_x, pixel_y,
     input wire enable,
+    input wire arpeggio_mode,
     input wire pcm_tap_valid,
     input wire signed [15:0] pcm_tap_left,
     output reg [23:0] rgb_out,
@@ -97,6 +99,17 @@ module promax_audio_waveform #(
         from_bottom[11:3]<blocks && from_bottom[2:0]<4;
     wire [23:0] bar_color=from_bottom[2:0]==3 ? 24'hb8f438 : 24'h20ee70;
 
+    wire scope_mode;
+    wire [23:0] scope_rgb;
+    wire scope_hit;
+    // Same one-clock RAM read as the envelope, then share the output register.
+    arpeggio_scope #(.WAVE_X(WAVE_X), .WAVE_Y(WAVE_Y),
+        .WAVE_WIDTH(WAVE_WIDTH), .WAVE_HEIGHT(WAVE_HEIGHT)) u_scope (
+        .clk(clk), .rst_n(rst_n), .frame_start(frame_start),
+        .arpeggio_mode(arpeggio_mode), .sample_valid(pcm_tap_valid), .sample(pcm_tap_left),
+        .pixel_x(pixel_x), .x1(x1), .y1(y1), .in_wave(in_wave),
+        .mode_frame(scope_mode), .rgb(scope_rgb), .trace_pixel(scope_hit));
+
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             rgb1<=0; x1<=0; y1<=0; vs1<=1; de1<=0;
@@ -106,10 +119,96 @@ module promax_audio_waveform #(
         end else begin
             rgb1<=rgb_in; x1<=pixel_x; y1<=pixel_y; vs1<=vsync; de1<=de;
             enabled1<=enable; valid1<=sample_valid; frame1<=frame_start;
-            rgb_out<=bar_pixel ? bar_color : rgb1;
+            rgb_out<=scope_mode && in_wave ? scope_rgb : bar_pixel && !scope_mode ? bar_color : rgb1;
             out_vs<=vs1; out_de<=de1; out_x<=x1; out_y<=y1;
             frame_start_out<=frame1;
-            waveform_active<=bar_pixel;
+            waveform_active<=scope_mode ? scope_hit : bar_pixel;
         end
     end
+endmodule
+
+// Triggered oscilloscope: 128 line segments, two 48kHz samples per segment.
+// The fixed 5.33ms window shows ~2..6 cycles of the image-linked arpeggios.
+// Packed adjacent endpoints need only one synchronous RAM read per pixel.
+// Capture into the hidden bank; swap only at VS, never during active video.
+module arpeggio_scope #(
+    parameter integer WAVE_X=64, WAVE_Y=368, WAVE_WIDTH=512, WAVE_HEIGHT=64
+)(
+    input wire clk, rst_n, frame_start, arpeggio_mode, sample_valid,
+    input wire signed [15:0] sample,
+    input wire [11:0] pixel_x, x1, y1,
+    input wire in_wave,
+    output reg mode_frame,
+    output wire [23:0] rgb,
+    output wire trace_pixel
+);
+    localparam integer SPACING=WAVE_WIDTH/128;
+    localparam integer CENTER=WAVE_HEIGHT/2;
+    localparam integer LIMIT=CENTER-4;
+    reg [15:0] points[0:255]; /* fehdl force_ram=1, ram_style="bram" */
+    reg display_bank, display_valid;
+    reg capturing, pending, decimate, previous_negative, mode_q;
+    reg [6:0] write_index;
+    reg [7:0] previous_y;
+    reg frame_signal;
+    wire mode_changed=arpeggio_mode!=mode_q;
+    wire crossing=previous_negative && !sample[15];
+    // Fixed scale: volume changes height, never the horizontal frequency scale.
+    wire signed [15:0] scaled=sample >>> 9;
+    wire [7:0] sample_y=scaled>LIMIT ? CENTER-LIMIT :
+        scaled< -LIMIT ? CENTER+LIMIT : CENTER-scaled;
+    wire write_point=arpeggio_mode && !mode_changed && sample_valid && capturing && decimate;
+    wire [6:0] read_index=(pixel_x-WAVE_X)/SPACING;
+    reg [15:0] endpoints;
+    always @(posedge clk) begin
+        if(rst_n && write_point)
+            points[{!display_bank,write_index}]<={previous_y,sample_y};
+        endpoints<=points[{display_bank,read_index}];
+    end
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            display_bank<=0; display_valid<=0; mode_frame<=0;
+            capturing<=0; pending<=0; decimate<=0; previous_negative<=0;
+            write_index<=0; previous_y<=CENTER; frame_signal<=0; mode_q<=0;
+        end else begin
+            mode_q<=arpeggio_mode;
+            if(sample_valid && (sample>256 || sample< -256)) frame_signal<=1;
+            if(!arpeggio_mode || mode_changed) begin
+                capturing<=0; pending<=0; previous_negative<=0; decimate<=0;
+            end else if(sample_valid) begin
+                previous_negative<=sample[15];
+                if(!capturing && !pending && crossing) begin
+                    capturing<=1; write_index<=0; previous_y<=sample_y; decimate<=0;
+                end else if(capturing) begin
+                    decimate<=!decimate;
+                    if(decimate) begin
+                        previous_y<=sample_y;
+                        if(write_index==127) begin capturing<=0; pending<=1; end
+                        else write_index<=write_index+1'b1;
+                    end
+                end
+            end
+            if(frame_start) begin
+                mode_frame<=arpeggio_mode;
+                frame_signal<=sample_valid && (sample>256 || sample< -256);
+                if(!arpeggio_mode || mode_changed || !frame_signal) display_valid<=0;
+                else if(pending) begin display_bank<=!display_bank; display_valid<=1; end
+                if(pending) pending<=0;
+            end
+        end
+    end
+    localparam integer FRACTION_BITS=(SPACING>1) ? $clog2(SPACING) : 1;
+    wire [FRACTION_BITS-1:0] fraction=(x1-WAVE_X)%SPACING;
+    wire signed [9:0] delta=$signed({1'b0,endpoints[7:0]})-$signed({1'b0,endpoints[15:8]});
+    wire signed [22:0] interpolation=delta*$signed({1'b0,fraction});
+    wire signed [22:0] interpolation_next=interpolation+delta;
+    wire signed [23:0] line_y=$signed({1'b0,endpoints[15:8]})+interpolation/SPACING;
+    wire signed [23:0] line_next=$signed({1'b0,endpoints[15:8]})+interpolation_next/SPACING;
+    wire [11:0] relative_y=y1-WAVE_Y;
+    wire [11:0] trace_y=display_valid ? line_y[11:0] : CENTER;
+    wire [11:0] trace_next=display_valid ? line_next[11:0] : CENTER;
+    wire [11:0] trace_min=trace_y<trace_next ? trace_y : trace_next;
+    wire [11:0] trace_max=trace_y>trace_next ? trace_y : trace_next;
+    assign trace_pixel=in_wave && relative_y>=trace_min && relative_y<=trace_max+1'b1;
+    assign rgb=trace_pixel ? 24'h40efb0 : relative_y==CENTER ? 24'h465864 : 24'h101c28;
 endmodule
