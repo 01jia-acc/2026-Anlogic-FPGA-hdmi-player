@@ -49,7 +49,7 @@ module sd_card_bmp_fat32 #(
     // ===================== 端口：按键（低有效原始输入，内部会同步+去抖） =====================
     input  wire        key_next,       // "下一张"按键
     input  wire        key_auto,       // "自动"键：短按=轮播开/关，长按=上一张
-    input  wire        key_audio_mode, // 板上 KEY3：短按切换 PCM/琶音
+    input  wire        key_audio_mode, // KEY3: normal switch-mode playback likes; legacy audio/menu key
     input  wire        switch_pcm_n, switch_zoom_n, // SW3/SW4: closed = low
 
     // bmp_width/bmp_height 与旧版扫描参数一样仅为顶层兼容保留；FAT32 目录
@@ -64,6 +64,7 @@ module sd_card_bmp_fat32 #(
     input wire [1:0] display_ack_bank,
     input wire [3:0] display_ack_image_id,
     output wire [3:0] display_image_id,
+    output wire [11:0] display_likes_bcd, // Per logical image, 000..999, reset clears all
     output reg         display_valid,  // 控制 HDMI 输出的开关
     // 数码管/调试用状态码：0 初始化，1 扫描，2 等待写端，3 读文件，4 空闲，F 错误。
     output wire [3:0]  state_code,
@@ -164,12 +165,19 @@ module sd_card_bmp_fat32 #(
     reg [1:0] victim_cursor;
     reg next_req_pending, prev_req_pending;
     reg auto_play_en;
-    reg [31:0] auto_cnt, long_press_cnt, load_timeout_cnt;
+    localparam integer LONG_PRESS_CYCLES = (CLK_FREQ_HZ / 1000) * LONG_PRESS_MS;
+    localparam integer LOAD_TIMEOUT_CYCLES = (CLK_FREQ_HZ / 1000) * LOAD_TIMEOUT_MS;
+    localparam integer AUTO_COUNT_BITS=(3*CLK_FREQ_HZ>1) ? $clog2(3*CLK_FREQ_HZ) : 1;
+    localparam integer HOLD_COUNT_BITS=(LONG_PRESS_CYCLES>1) ? $clog2(LONG_PRESS_CYCLES) : 1;
+    // Include the timeout value itself: the comparison is >=, not == limit-1.
+    localparam integer LOAD_COUNT_BITS=(LOAD_TIMEOUT_CYCLES>0) ? $clog2(LOAD_TIMEOUT_CYCLES+1) : 1;
+    reg [AUTO_COUNT_BITS-1:0] auto_cnt;
+    reg [HOLD_COUNT_BITS-1:0] long_press_cnt;
+    reg [LOAD_COUNT_BITS-1:0] load_timeout_cnt;
     reg key_auto_down_seen, long_press_marked, next_down_seen, next_release_pulse;
     reg load_busy, source_done_seen, write_done_seen;
     wire write_finish_pulse;
     reg [1:0] load_prepare;
-    localparam integer LOAD_TIMEOUT_CYCLES = (CLK_FREQ_HZ / 1000) * LOAD_TIMEOUT_MS;
     // The decode offset advances one byte per SD-domain clock at most, so
     // tracking its LSB detects every advance using only one extra register.
     // Do not count unrelated PCM traffic as image progress.
@@ -222,7 +230,7 @@ module sd_card_bmp_fat32 #(
     reg brightness_mode_q, audio_blocked;
     wire switch_pcm_stable, switch_zoom_stable;
     reg audio_down_seen, audio_long_marked, zoom_auto_down;
-    reg [31:0] audio_hold_count;
+    reg [HOLD_COUNT_BITS-1:0] audio_hold_count;
     reg [3:0] zoom_image_id;
     reg thumbnail_mode, thumbnail_epoch;
     reg [1:0] thumbnail_focus;
@@ -278,7 +286,6 @@ module sd_card_bmp_fat32 #(
     wire thumbnail_ready = thumbnail_epoch==thumbnail_ack2;
     assign thumbnail_descriptor={thumbnail_banks,thumbnail_mode,thumbnail_epoch,thumbnail_focus,
         thumbnail_complete,thumbnail_ids};
-    localparam integer LONG_PRESS_CYCLES = (CLK_FREQ_HZ / 1000) * LONG_PRESS_MS;
     // Confirm/cancel owns this cycle. Simultaneous navigation must not change
     // the exit packet's target bank after the selection has already been made.
     wire thumbnail_action = thumbnail_mode && thumbnail_ready &&
@@ -291,6 +298,44 @@ module sd_card_bmp_fat32 #(
                            display_ack_image_id == img_idx;
     // Request the next image after three seconds of settled display.
     wire auto_tick = auto_cnt == 3 * CLK_FREQ_HZ - 1;
+    // The scanner exposes ten playable slots. Share the display read port with
+    // the incrementer; like_image only guards a gesture against image changes.
+    reg [11:0] image_likes [0:9];
+    reg like_armed;
+    reg [3:0] like_image;
+    integer like_reset_index;
+    wire like_allowed=SWITCH_MODE_ENABLE && display_valid && display_settled &&
+        !brightness_mode && !volume_mode && !zoom_mode && !thumbnail_hold &&
+        !audio_blocked && !next_req_pending && !prev_req_pending && !next_release_pulse &&
+        key_next_stable && key_auto_stable && !next_down_seen && !key_auto_down_seen;
+    assign display_likes_bcd=img_idx<10 ? image_likes[img_idx] : 12'd0;
+    function [11:0] increment_like;
+        input [11:0] value;
+        begin
+            if(value==12'h999) increment_like=value;
+            else if(value[7:0]==8'h99) increment_like={value[11:8]+4'd1,8'h00};
+            else if(value[3:0]==4'd9) increment_like={value[11:8],value[7:4]+4'd1,4'h0};
+            else increment_like={value[11:4],value[3:0]+4'd1};
+        end
+    endfunction
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            for(like_reset_index=0;like_reset_index<10;like_reset_index=like_reset_index+1)
+                image_likes[like_reset_index]<=0;
+            like_armed<=0; like_image<=0;
+        end else begin
+            // Capture the shown image on press; cancel if it changes before release.
+            if(!like_allowed || img_idx!=like_image) like_armed<=0;
+            if(key_audio_mode_press && like_allowed) begin
+                like_armed<=1; like_image<=img_idx;
+            end
+            if(key_audio_stable && audio_down_seen) begin
+                like_armed<=0;
+                if(like_armed && like_allowed && img_idx==like_image && img_idx<10 && !audio_long_marked)
+                    image_likes[img_idx]<=increment_like(display_likes_bcd);
+            end
+        end
+    end
     // Split seconds from subsecond clocks: 60*100MHz exceeds 32 bits.
     localparam integer MANUAL_TICK_BITS=CLK_FREQ_HZ>1 ? $clog2(CLK_FREQ_HZ) : 1;
     reg [MANUAL_TICK_BITS-1:0] manual_subsecond_count;

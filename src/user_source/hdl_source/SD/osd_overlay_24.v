@@ -1,4 +1,90 @@
 `timescale 1ns/1ps
+// Right-side like badge. BCD arrives in the existing atomic status mailbox.
+// Snapshot at VS, hide stale packets on picture changes, no video latency.
+module image_likes_osd (
+    input wire clk, rst_n, frame_start, de, enable,
+    input wire [11:0] pixel_x, pixel_y, count_bcd,
+    input wire [3:0] count_image, display_image,
+    input wire [23:0] rgb_in,
+    output reg [23:0] rgb_out
+);
+    reg [11:0] count_q;
+    reg [3:0] image_q;
+    reg valid_q;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin count_q<=0; image_q<=0; valid_q<=0; end
+        else if(frame_start) begin
+            count_q<=count_bcd; image_q<=count_image;
+            valid_q<=enable && count_image==display_image;
+        end
+    end
+    // Narrow local offsets; absolute bounds below prevent wrapped coordinates
+    // from drawing outside the badge. No full-width subtract/variable shift.
+    wire [4:0] hx=pixel_x[4:0]-5'd16, hy=pixel_y[4:0]-5'd10;
+    // Heart and number share x=604 as their center. Shift the three-digit
+    // seats by half a seat for every suppressed leading digit.
+    wire [5:0] number_shift=count_q[11:8]!=0 ? 6'd0 : count_q[7:4]!=0 ? 6'd6 : 6'd12;
+    wire [5:0] dx=pixel_x[5:0]-6'd11+number_shift;
+    wire [3:0] dy=pixel_y[3:0]-4'd6;
+    reg [11:0] heart_row;
+    reg [3:0] digit;
+    reg [3:0] digit_x;
+    reg [34:0] glyph;
+    reg [4:0] glyph_row;
+    reg digit_visible;
+    always @* begin
+        case(hy[4:1])
+            0:heart_row=12'b001100001100;
+            1:heart_row=12'b011110011110;
+            2,3,4:heart_row=12'b111111111111;
+            5:heart_row=12'b011111111110;
+            6:heart_row=12'b001111111100;
+            7:heart_row=12'b000111111000;
+            8:heart_row=12'b000011110000;
+            9:heart_row=12'b000001100000;
+            default:heart_row=0;
+        endcase
+        digit=count_q[3:0]; digit_x=dx[3:0]-4'd8; digit_visible=1;
+        if(dx<12) begin
+            digit=count_q[11:8]; digit_x=dx[3:0]; digit_visible=count_q[11:8]!=0;
+        end else if(dx<24) begin
+            digit=count_q[7:4]; digit_x=dx[3:0]-4'd12; digit_visible=count_q[11:4]!=0;
+        end
+        case(digit)
+            0:glyph={5'b01110,5'b10001,5'b10011,5'b10101,5'b11001,5'b10001,5'b01110};
+            1:glyph={5'b00100,5'b01100,5'b00100,5'b00100,5'b00100,5'b00100,5'b01110};
+            2:glyph={5'b01110,5'b10001,5'b00001,5'b00010,5'b00100,5'b01000,5'b11111};
+            3:glyph={5'b11110,5'b00001,5'b00001,5'b01110,5'b00001,5'b00001,5'b11110};
+            4:glyph={5'b00010,5'b00110,5'b01010,5'b10010,5'b11111,5'b00010,5'b00010};
+            5:glyph={5'b11111,5'b10000,5'b10000,5'b11110,5'b00001,5'b00001,5'b11110};
+            6:glyph={5'b01110,5'b10000,5'b10000,5'b11110,5'b10001,5'b10001,5'b01110};
+            7:glyph={5'b11111,5'b00001,5'b00010,5'b00100,5'b01000,5'b01000,5'b01000};
+            8:glyph={5'b01110,5'b10001,5'b10001,5'b01110,5'b10001,5'b10001,5'b01110};
+            9:glyph={5'b01110,5'b10001,5'b10001,5'b01111,5'b00001,5'b00001,5'b01110};
+            default:glyph=0;
+        endcase
+        case(dy[3:1])
+            0:glyph_row=glyph[34:30];
+            1:glyph_row=glyph[29:25];
+            2:glyph_row=glyph[24:20];
+            3:glyph_row=glyph[19:15];
+            4:glyph_row=glyph[14:10];
+            5:glyph_row=glyph[9:5];
+            6:glyph_row=glyph[4:0];
+            default:glyph_row=0;
+        endcase
+        rgb_out=rgb_in;
+        if(de && enable && valid_q && image_q==display_image) begin
+            // Transparent overlay: only replace heart/number stroke pixels.
+            if(pixel_x>=592 && pixel_x<616 && pixel_y>=202 && pixel_y<222 &&
+               heart_row[4'd11-hx[4:1]]) rgb_out=24'hff3048;
+            if(pixel_x>=587 && pixel_x<621 && pixel_y>=230 && pixel_y<244 &&
+               dx<34 && digit_x<10 && digit_visible && glyph_row[3'd4-digit_x[3:1]])
+                rgb_out=24'hffffff;
+        end
+    end
+endmodule
+
 // RGB888 包装层：用同一组最终 DE/VS 重建坐标，再调用 RGB444 字形核心。
 // 本工程适配：讲义外接 pixel_x；这里同时重建 x/y，避免前级坐标与后级RGB错拍。
 // 不改原图缓存。只在输出时把字形笔画像素替换为文字色。
@@ -79,7 +165,9 @@ module thumbnail_status_osd #(
     wire [11:0] lx=pixel_x-(pixel_x>=320 ? 320 : LEFT);
     wire [11:0] ly=pixel_y-(pixel_y>=240 ? 240 : TOP);
     wire inside=pixel_x>=LEFT && pixel_x<320+TILE_W && pixel_y>=TOP && pixel_y<240+TILE_H;
-    reg [11:0] tx, ty;
+    // Each guarded text region is at most 152 pixels wide and 7 high.
+    reg [7:0] tx;
+    reg [2:0] ty;
     reg [7:0] ch;
     reg [34:0] glyph;
     reg [4:0] bits_row;
@@ -88,22 +176,25 @@ module thumbnail_status_osd #(
     localparam [8*13-1:0] TITLE="CACHE PREVIEW";
     localparam [8*19-1:0] HELP="2 NEXT 4 PREV 3 OK ";
     localparam [8*10-1:0] BACK="HOLD3 BACK";
+    wire [3:0] title_index=4'd12-tx[6:3];
+    wire [4:0] help_index=5'd18-tx[7:3];
+    wire [3:0] back_index=4'd9-tx[6:3];
     always @* begin
         tx=0; ty=0; ch=" "; text_area=0;
         if(pixel_x>=TITLE_X && pixel_x<TITLE_X+104 && pixel_y>=TITLE_Y && pixel_y<TITLE_Y+7) begin
             tx=pixel_x-TITLE_X; ty=pixel_y-TITLE_Y; text_area=1;
-            ch=TITLE >> ((12-tx[6:3])*8);
+            ch=TITLE >> {title_index,3'b000};
         end else if(pixel_x>=HELP_X && pixel_x<HELP_X+152 && pixel_y>=HELP_Y && pixel_y<HELP_Y+7) begin
             tx=pixel_x-HELP_X; ty=pixel_y-HELP_Y; text_area=1;
-            ch=HELP >> ((18-tx[7:3])*8);
+            ch=HELP >> {help_index,3'b000};
         end else if(pixel_x>=BACK_X && pixel_x<BACK_X+80 && pixel_y>=BACK_Y && pixel_y<BACK_Y+7) begin
             tx=pixel_x-BACK_X; ty=pixel_y-BACK_Y; text_area=1;
-            ch=BACK >> ((9-tx[6:3])*8);
+            ch=BACK >> {back_index,3'b000};
         end else if(inside && lx>=8 && lx<24 && ly>=4 && ly<11) begin
             tx=lx-8; ty=ly-4; text_area=1;
             if(!ready) ch="-";
             else if(tx<8) ch=number>=10 ? "1" : "0";
-            else ch="0"+(number>=10 ? number-10 : number);
+            else ch=8'd48+(number>=5'd10 ? number-5'd10 : number);
         end
         case(ch)
             "0":glyph={5'b01110,5'b10001,5'b10011,5'b10101,5'b11001,5'b10001,5'b01110};
@@ -136,7 +227,16 @@ module thumbnail_status_osd #(
             "-":glyph={5'b00000,5'b00000,5'b00000,5'b11111,5'b00000,5'b00000,5'b00000};
             default:glyph=0;
         endcase
-        bits_row=ty<7 ? glyph >> ((6-ty[2:0])*5) : 0;
+        case(ty)
+            0:bits_row=glyph[34:30];
+            1:bits_row=glyph[29:25];
+            2:bits_row=glyph[24:20];
+            3:bits_row=glyph[19:15];
+            4:bits_row=glyph[14:10];
+            5:bits_row=glyph[9:5];
+            6:bits_row=glyph[4:0];
+            default:bits_row=0;
+        endcase
         rgb_out=rgb_in;
         if(de && enabled) begin
             if(inside && ly<14) rgb_out=24'h101820;

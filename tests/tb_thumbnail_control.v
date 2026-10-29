@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 // Real keys/scheduler/display commit/mailbox. File completion and the reader's
 // one-clock-delayed descriptor capture are modeled; reader RGB tested separately.
-module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, parameter BRIGHTNESS_TEST=0, parameter MANUAL_IDLE_TEST=0);
+module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, parameter BRIGHTNESS_TEST=0, parameter MANUAL_IDLE_TEST=0, parameter LIKE_TEST=0);
     reg clk=0, pix_clk=0, rst=1;
     always #5 clk=~clk;
     always #20 pix_clk=~pix_clk;
@@ -21,6 +21,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
     wire [1:0] display_bank, write_bank, ack_bank, zoom_level;
     wire [3:0] image_id, ack_id;
     wire [3:0] committed_id;
+    wire [11:0] likes_bcd;
     wire committed_valid;
     wire [3:0] selected_pcm_image;
     wire selected_pcm_toggle;
@@ -49,6 +50,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         .key_contrast_up(key_reset), .contrast_level(contrast_level),
         .bmp_width(16'd640), .bmp_height(16'd480), .SD_MISO(1'b1),
         .display_valid(display_valid), .display_image_id(image_id),
+        .display_likes_bcd(likes_bcd),
         .display_ack_valid(ack_valid), .display_ack_bank(ack_bank), .display_ack_image_id(ack_id),
         .disp_buf_idx(display_bank), .write_buf_idx(write_bank), .write_finish_toggle(write_toggle),
         .write_req_ack(1'b1), .zoom_mode(zoom_mode), .zoom_level(zoom_level), .pcm_mode(pcm_mode),
@@ -87,6 +89,61 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
                 @(negedge pix_clk); frame_req=0;
                 repeat(30) @(negedge pix_clk);
             end
+        end
+    endtask
+    task like_scenarios;
+        integer n;
+        begin
+            fill_window;
+            if(likes_bcd!=0) $fatal(1,"Likes must start at zero");
+            // Raw contact bounce must not create a click.
+            repeat(4) begin key_audio=0;repeat(2) @(negedge clk);key_audio=1;repeat(2) @(negedge clk);end
+            repeat(65) @(negedge clk);
+            if(likes_bcd!=0) $fatal(1,"Bounce counted as like");
+            press(3,65);
+            if(likes_bcd!=12'h001 || pcm_mode) $fatal(1,"Short KEY3 must like without switching audio");
+            press(3,280);
+            if(likes_bcd!=12'h001) $fatal(1,"Long hold must not like");
+            press(2,65);frame;fill_window;
+            if(image_id!=1 || likes_bcd!=0) $fatal(1,"Image counts are not independent");
+            switch_pcm_n=0;repeat(65) @(negedge clk);press(3,65);
+            if(likes_bcd!=12'h001 || !pcm_mode) $fatal(1,"PCM like changed audio");
+            for(n=1;n<1001;n=n+1) begin
+                press(3,65);
+                if(n==8 && likes_bcd!=12'h009) $fatal(1,"Nine likes");
+                if(n==9 && likes_bcd!=12'h010) $fatal(1,"Decimal units carry");
+                if(n==99 && likes_bcd!=12'h100) $fatal(1,"Decimal hundreds carry");
+            end
+            if(likes_bcd!=12'h999) $fatal(1,"Like saturation");
+            press(4,280);frame;fill_window;
+            if(image_id!=0 || likes_bcd!=12'h001) $fatal(1,"Returning image lost its count");
+            // A press begun on one picture must never like a different picture.
+            key_audio=0;repeat(65) @(negedge clk);
+            press(2,65);frame;fill_window;
+            if(dut.image_likes[0]!=12'h001 || dut.image_likes[1]!=12'h999)
+                $fatal(1,"Overlapping image change misattributed a like");
+            press(2,65);frame;fill_window;
+            switch_brightness_n=0;repeat(65) @(negedge clk);press(3,65);
+            if(likes_bcd!=0) $fatal(1,"Brightness key also liked");
+            switch_brightness_n=1;switch_volume_n=0;repeat(65) @(negedge clk);press(3,65);
+            if(likes_bcd!=0) $fatal(1,"Volume mode also liked");
+            switch_volume_n=1;switch_zoom_n=0;repeat(65) @(negedge clk);press(3,65);frame;
+            if(!descriptor[23] || likes_bcd!=0) $fatal(1,"Preview entry also liked");
+            press(3,65);frame;
+            if(descriptor[23] || likes_bcd!=0) $fatal(1,"Preview confirmation also liked");
+            switch_zoom_n=1;repeat(65) @(negedge clk);frame;fill_window;
+            // Enabling/disabling an adjustment while held cancels the gesture.
+            key_audio=0;repeat(65) @(negedge clk);
+            switch_volume_n=0;repeat(65) @(negedge clk);
+            switch_volume_n=1;repeat(65) @(negedge clk);
+            key_audio=1;repeat(65) @(negedge clk);
+            if(likes_bcd!=0) $fatal(1,"Mode change retained armed like");
+            press(4,65);press(3,65);
+            if(!dut.auto_play_en || likes_bcd!=12'h001) $fatal(1,"Autoplay like failed");
+            boot;
+            for(n=0;n<10;n=n+1)
+                if(dut.image_likes[n]!=0) $fatal(1,"Reset did not clear every count");
+            $display("PASS: KEY3 debounce, short/long gestures, per-image likes, decimal carries/999 saturation, navigation, PCM/auto, adjustment/preview ownership and reset");
         end
     endtask
     task manual_idle_scenarios;
@@ -403,6 +460,7 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
         force dut.resource2_size=32'd921654; force dut.resource3_size=32'd921654;
         force dut.source_load_done=source_done; force dut.source_load_error=8'd0;
         boot;
+        if(LIKE_TEST) begin like_scenarios; $finish; end
         if(MANUAL_IDLE_TEST) begin manual_idle_scenarios; $finish; end
         if(BRIGHTNESS_TEST) begin brightness_scenarios; $finish; end
         if(VOLUME_TEST) begin volume_scenarios; $finish; end
@@ -492,4 +550,9 @@ endmodule
 module tb_manual_idle_control;
     tb_thumbnail_control #(.SWITCH_TEST(1), .VOLUME_TEST(1), .BRIGHTNESS_TEST(1),
                           .MANUAL_IDLE_TEST(1)) scenario();
+endmodule
+
+module tb_image_like_control;
+    tb_thumbnail_control #(.SWITCH_TEST(1), .VOLUME_TEST(1), .BRIGHTNESS_TEST(1),
+                          .LIKE_TEST(1)) scenario();
 endmodule

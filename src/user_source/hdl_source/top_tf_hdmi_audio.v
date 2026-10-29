@@ -89,7 +89,7 @@ module top(
 
     // USB-UART（板载 CH340：FPGA RXD=F12，TXD=D12）
     input                       uart_rxd,      // 【输入自 CH340】UTF-8字幕文本，回车提交
-    output                      uart_txd       // 【输出到 CH340】串口日志 TX
+    output                      uart_txd       // 【输出到 CH340】空闲高电平，不发送调试日志
 );
 
 // SDRAM 应用侧数据宽度：每个存储字 32 bit。
@@ -141,27 +141,11 @@ wire [23:0] vout_data_raw;  // 【视频流水线输出→top】已与 de 对齐
 wire [23:0] vout_data;      // 【top 输出→video_rgb_to_axis】最终 RGB，未提交时为黑色
 wire        display_valid;  // 【sd_card_bmp 输出→top】第一张图完整提交前为 0
 
-// sd_card_bmp 的调试状态码，经过译码后显示在数码管上。
-wire [3:0]  state_code;    // 【sd_card_bmp 输出→seg_decoder】当前 SD/加载状态码
-wire [6:0]  seg_data_0;    // 【seg_decoder 输出→seg_scan】低有效/编码后的段码
 
-// USB-UART 调试状态：由 SD/FAT32 控制器提供，供 50 MHz 日志时钟域采样。
-wire        debug_sd_init_done;
+// SD/FAT32 状态经邮箱送到屏幕 OSD，保留错误提示。
 wire osd_auto_sd;                 // SD域模式，经快照邮箱送到像素域
-wire        debug_scan_busy;
-wire        debug_scan_done;
 wire [7:0]  debug_scan_error;
-wire        debug_source_ready;
-wire        debug_load_busy;
 wire [7:0]  debug_load_error;
-wire [4:0] debug_load_image_number;
-wire [31:0] debug_load_cluster, debug_load_size;
-wire [31:0] debug_source_cluster;
-wire [63:0] debug_load_pipeline;
-wire [63:0] debug_playlist_sd;
-wire [95:0] debug_playlist_uart;
-wire debug_playlist_ready;
-wire [159:0] debug_pcm_status;
 wire signed [15:0] pcm_stream_sample;
 wire pcm_stream_valid, pcm_stream_active, pcm_stream_ready;
 wire pcm_mode;
@@ -185,19 +169,7 @@ wire [4:0] brightness_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[55:51] : 5
 wire [5:0] contrast_level_sd;
 wire [5:0] contrast_level_pix=osd_sd_snapshot[50] ? osd_sd_snapshot[62:57] : 6'd20;
 wire [7:0] pcm_stream_error;
-// FAT/SD 链路的细粒度诊断观察线，送给 50MHz UART 日志模块。
-wire [3:0]  debug_scanner_state;
-wire [31:0] debug_sector_lba;
-wire [8:0]  debug_sector_byte_count;
-wire        debug_sector_active;
-wire [15:0] debug_sector_done_count;
-wire [15:0] debug_resource_valid;
-wire [4:0] debug_image_count;
-wire [31:0] debug_root_crc;
-wire [15:0] debug_root_bytes;
-wire [4:0]  debug_sd_state;
-wire        debug_sd_cmd_error;
-wire        debug_sd_cmd_error_latched;
+// UART 仅接收字幕，不再发送调试日志。
 wire [7:0]  uart_rx_data;
 wire        uart_rx_valid;
 
@@ -224,6 +196,7 @@ wire [1:0]  write_buf_idx;            // 【sd_card_bmp 输出→frame_read_writ
 wire [1:0]  disp_buf_idx;             // 【sd_card_bmp 输出】期望显示的缓冲区编号
 wire [1:0]  video_disp_buf_idx;       // 视频帧请求边界锁存的实际读取缓冲区
 wire [3:0] display_image_id, video_image_id, display_ack_image_id;
+wire [11:0] display_likes_bcd;
 wire [1:0] display_ack_bank;
 wire display_ack_valid;
 wire        video_display_valid;
@@ -279,9 +252,6 @@ wire        writer_load_busy;
 wire        writer_load_done;
 wire [3:0]  writer_image_complete;
 wire [7:0]  writer_memory_error;
-wire [47:0] writer_debug_status;
-wire [95:0] writer_debug_uart;
-wire writer_debug_ready;
 wire        writer_app_wr_en_src;
 wire [ADDR_BITS-1:0] writer_app_wr_addr_src;
 wire [3:0]  writer_app_wr_mask_src;
@@ -495,12 +465,12 @@ sd_card_bmp_fat32 #(
     .switch_brightness_n(switch_brightness_n),
     .brightness_mode(brightness_mode_sd), .brightness_level(brightness_level_sd),
     .key_contrast_up(rst_n), .contrast_level(contrast_level_sd),
-    // state_code 只用于数码管调试，不参与图像数据传输。
-    .state_code        (state_code),           // 输出：当前扫描/加载状态码
+    .state_code        (),                     // 数码管调试已关闭
     .bmp_width         (16'd640),              // 输入：要求 BMP 宽度为 640
     .bmp_height        (16'd480),              // 输入：要求 BMP 高度为 480
     .display_valid     (display_valid),        // 输出→top：首帧提交后允许显示
     .display_image_id(display_image_id),
+    .display_likes_bcd(display_likes_bcd),
     .zoom_mode(zoom_mode_sd), .zoom_level(zoom_level_sd),
     .thumbnail_descriptor(thumbnail_sd), .thumbnail_ack_epoch(display_thumbnail[22]),
     .display_ack_valid(display_ack_valid), .display_ack_bank(display_ack_bank),
@@ -519,40 +489,40 @@ sd_card_bmp_fat32 #(
     .SD_DCLK           (sd_dclk),               // 输出→TF 卡：SPI 时钟
     .SD_MOSI           (sd_mosi),               // 输出→TF 卡：SPI 主出从入数据
     .SD_MISO           (sd_miso),               // 输入←TF 卡：SPI 主入从出数据
-    .debug_sd_init_done(debug_sd_init_done),
+    .debug_sd_init_done(),
     .debug_auto_enabled(osd_auto_sd),
-    .debug_scan_busy   (debug_scan_busy),
-    .debug_scan_done   (debug_scan_done),
+    .debug_scan_busy(),
+    .debug_scan_done(),
     .debug_scan_error  (debug_scan_error),
-    .debug_source_ready(debug_source_ready),
-    .debug_load_busy   (debug_load_busy),
+    .debug_source_ready(),
+    .debug_load_busy(),
     .debug_load_error  (debug_load_error),
-    .debug_load_image_number(debug_load_image_number),
-    .debug_load_cluster(debug_load_cluster), .debug_load_size(debug_load_size),
-    .debug_source_cluster(debug_source_cluster),
-    .debug_scanner_state(debug_scanner_state),
-    .debug_sector_lba(debug_sector_lba),
-    .debug_sector_byte_count(debug_sector_byte_count),
-    .debug_sector_active(debug_sector_active),
-    .debug_sector_done_count(debug_sector_done_count),
-    .debug_resource_valid(debug_resource_valid),
-    .debug_image_count(debug_image_count),
-    .debug_root_crc(debug_root_crc),
-    .debug_root_bytes(debug_root_bytes),
-    .debug_sd_state(debug_sd_state),
-    .debug_sd_cmd_error(debug_sd_cmd_error),
-    .debug_sd_cmd_error_latched(debug_sd_cmd_error_latched),
-    .debug_load_pipeline(debug_load_pipeline),
-    .debug_playlist(debug_playlist_sd),
-    .debug_pcm_status(debug_pcm_status)
+    .debug_load_image_number(),
+    .debug_load_cluster(), .debug_load_size(),
+    .debug_source_cluster(),
+    .debug_scanner_state(),
+    .debug_sector_lba(),
+    .debug_sector_byte_count(),
+    .debug_sector_active(),
+    .debug_sector_done_count(),
+    .debug_resource_valid(),
+    .debug_image_count(),
+    .debug_root_crc(),
+    .debug_root_bytes(),
+    .debug_sd_state(),
+    .debug_sd_cmd_error(),
+    .debug_sd_cmd_error_latched(),
+    .debug_load_pipeline(),
+    .debug_playlist(),
+    .debug_pcm_status()
  );
 
 // ============================================================================
-// USB-UART 调试接口
+// USB-UART 字幕接收接口
 // ============================================================================
 // 115200 baud, 8 data bits, no parity, 1 stop bit (8-N-1).
-// 日志从 uart_txd 输出；uart_rxd 已接入接收器，最近收到的字节会在日志
-// 中显示，后续可在此基础上增加串口命令控制。
+// uart_rxd 接收 UTF-8 字幕；调试日志发送及其跨域快照已移除。
+// uart_txd 保持空闲高电平。
 uart_rx #(
     .CLOCK_FREQ_HZ(50_000_000),
     .BAUD_RATE    (115_200)
@@ -564,84 +534,15 @@ uart_rx #(
     .rx_valid (uart_rx_valid)
 );
 
-// Read-only diagnostic mailbox: keep all playlist fields from one SD clock.
-// Both endpoints use the same reset, including before the PLL starts.
-subtitle_frame_commit u_playlist_debug_commit (
-    .src_clk(sd_card_clk), .src_rst_n(~rst_all),
-    .src_commit(debug_playlist_ready), .src_ready(debug_playlist_ready),
-    .src_text({32'd0,debug_playlist_sd}), .src_length(6'd0), .src_enable(1'b1),
-    .dst_clk(clk), .dst_rst_n(~rst_all), .frame_start(1'b1),
-    .dst_text(debug_playlist_uart), .dst_length(), .dst_enable()
-);
-
-// Transfer error and both pixel counters together; no torn multi-bit UART read.
-subtitle_frame_commit u_writer_debug_commit (
-    .src_clk(sd_card_clk), .src_rst_n(~rst_all),
-    .src_commit(writer_debug_ready), .src_ready(writer_debug_ready),
-    .src_text({48'd0,writer_debug_status}), .src_length(6'd0), .src_enable(1'b1),
-    .dst_clk(clk), .dst_rst_n(~rst_all), .frame_start(1'b1),
-    .dst_text(writer_debug_uart), .dst_length(), .dst_enable()
-);
-
-uart_debug_logger #(
-    .CLOCK_FREQ_HZ   (50_000_000),
-    .BAUD_RATE       (115_200),
-    .LOG_INTERVAL_MS (1000),
-    .COMPACT_LOG     (1)
-) u_uart_debug_logger (
-    .clk            (clk),
-    .rst            (~system_reset_n),
-    .pll_ready      (sys_pll_lock && video_pll_lock),
-    .sd_init_done   (debug_sd_init_done),
-    .state_code     (state_code),
-    .scan_busy      (debug_scan_busy),
-    .scan_done      (debug_scan_done),
-    .scan_error     (pcm_stream_error != 0 ? pcm_stream_error :
-                     debug_load_error != 0 ? debug_load_error : debug_scan_error),
-    .display_valid  (display_valid),
-    .rx_data        (uart_rx_data),
-    .scanner_state  (debug_scanner_state),
-    .sector_active  (debug_sector_active),
-    .sector_lba     (debug_sector_lba),
-    .sector_byte_count(debug_sector_byte_count),
-    .sd_state       (debug_sd_state),
-    .sd_cmd_error_latched(debug_sd_cmd_error_latched),
-    .resource_valid (debug_resource_valid),
-    .image_count    (debug_image_count),
-    .root_crc(debug_root_crc),
-    .root_bytes(debug_root_bytes),
-    .sector_done_count(debug_sector_done_count),
-    .load_image_number(debug_load_image_number),
-    .load_cluster(debug_load_cluster), .load_size(debug_load_size),
-    .accepted_cluster(debug_source_cluster),
-    .load_pipeline(debug_load_pipeline),
-    .playlist_snapshot(debug_playlist_uart[63:0]),
-    .pcm_status(debug_pcm_status),
-    .writer_status(writer_debug_uart[47:0]),
-    .tx             (uart_txd)
-);
+// Debug TX is disabled; keep the physical pin at UART idle level.
+assign uart_txd = 1'b1;
 
 // ============================================================================
 // 数码管调试输出
 // ============================================================================
-// state_code → 七段译码 → 动态扫描。它与图像主数据流无关。
-seg_decoder seg_decoder_m0(
-    .bin_data          (state_code),     // 输入：4 bit 状态码
-    .seg_data          (seg_data_0)      // 输出→seg_scan：七段编码
-);
-
-seg_scan seg_scan_m0(
-    .clk               (clk),             // 输入：数码管扫描时钟
-    .rst_n             (system_reset_n),
-    .seg_sel           (seg_sel),         // 输出→顶层管脚：数码管位选
-    .seg_data          (seg_data),        // 输出→顶层管脚：数码管段选
-    .seg_data_0        ({1'b1,7'b1111_111}), // 输入：第 0 位关闭
-    .seg_data_1        ({1'b1,7'b1111_111}), // 输入：第 1 位关闭
-    .seg_data_2        ({1'b1,7'b1111_111}), // 输入：第 2 位关闭
-    .seg_data_3        ({1'b1,7'b1111_111}), // 输入：第 3 位关闭
-    .seg_data_4        ({1'b1,7'b1111_111}), // 输入：第 4 位关闭
-    .seg_data_5        ({1'b1,seg_data_0})   // 输入：第 5 位显示状态码
-);
+// 调试数码管关闭：位选和段选均为低有效，全部置高。
+assign seg_sel = 6'b111111;
+assign seg_data = 8'hff;
 
 // ============================================================================
 // 视频时序发生器
@@ -756,6 +657,7 @@ wire [23:0] thumbnail_rgb;
 wire [23:0] volume_rgb;
 wire [23:0] brightness_osd_rgb;
 wire [23:0] contrast_osd_rgb;
+wire [23:0] likes_rgb;
 wire [23:0] waveform_rgb;
 wire waveform_vs, waveform_de, waveform_frame_start;
 wire [11:0] waveform_x, waveform_y;
@@ -773,7 +675,7 @@ wire [7:0] osd_error = (osd_mem_snapshot[7:0] != 0) ?
 subtitle_frame_commit u_osd_sd_commit (
     .src_clk(sd_card_clk), .src_rst_n(~rst_all),
     .src_commit(osd_sd_ready), .src_ready(osd_sd_ready),
-    .src_text({33'd0,contrast_level_sd,brightness_mode_sd,brightness_level_sd,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
+    .src_text({17'd0,display_image_id,display_likes_bcd,contrast_level_sd,brightness_mode_sd,brightness_level_sd,1'b1,volume_mode_sd,volume_level_sd,thumbnail_sd,zoom_mode_sd,zoom_level_sd,osd_auto_sd,osd_sd_error}), .src_length(6'd0), .src_enable(1'b1),
     .dst_clk(video_clk), .dst_rst_n(~rst_all), .frame_start(!de),
     .dst_text(osd_sd_snapshot), .dst_length(), .dst_enable()
 );
@@ -853,9 +755,17 @@ volume_status_osd #(.OSD_X(376), .LABEL("CON"), .LEVEL_BITS(6), .DEFAULT_LEVEL(2
 // Both use exact post-gain HDMI samples, including PCM silence/underflow.
 // Preview hides the overlay; capture continues so returning shows fresh audio.
 wire opening_active;
+image_likes_osd u_image_likes (
+    .clk(video_clk), .rst_n(~rst_all), .frame_start(osd_frame_start),
+    .de(osd_de), .pixel_x(osd_x), .pixel_y(osd_y),
+    .count_bcd(osd_sd_snapshot[74:63]), .count_image(osd_sd_snapshot[78:75]),
+    .display_image(video_image_id),
+    .enable(video_display_valid && !display_thumbnail[23] && !opening_active),
+    .rgb_in(contrast_osd_rgb), .rgb_out(likes_rgb)
+);
 promax_audio_waveform #(.WAVE_Y(368)) u_audio_waveform (
     .clk(video_clk), .rst_n(~rst_all), .vsync(vs), .de(osd_de),
-    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : contrast_osd_rgb),
+    .pixel_x(osd_x), .pixel_y(osd_y), .rgb_in(opening_active ? transition_rgb : likes_rgb),
     .enable(AUDIO_WAVEFORM_ENABLE != 0 && video_display_valid && !display_thumbnail[23] && !opening_active),
     .pcm_tap_valid(audio_valid), .pcm_tap_left(audio_left_data[23:8]),
     .arpeggio_mode(arpeggio_active),
@@ -921,7 +831,7 @@ media_frame_loader #(
     .load_done            (writer_load_done),
     .image_complete       (writer_image_complete),
     .memory_error         (writer_memory_error),
-    .debug_writer_status  (writer_debug_status),
+    .debug_writer_status(),
     .controller_init_done (Sdr_init_done),
     .controller_busy      (Sdr_busy),
     .refresh_active       (Sdr_init_ref_vld),
