@@ -329,7 +329,15 @@ module sd_card_bmp_fat32 #(
             if(key_audio_mode_press && like_allowed) begin
                 like_armed<=1; like_image<=img_idx;
             end
-            if(key_audio_stable && audio_down_seen) begin
+            // Reuse the existing one-second hold detector; fire once while
+            // held, then disarm so release cannot count as a short like.
+            if(like_armed && like_allowed && img_idx==like_image &&
+               audio_down_seen && !key_audio_stable && !audio_long_marked &&
+               audio_hold_count>=LONG_PRESS_CYCLES-1) begin
+                for(like_reset_index=0;like_reset_index<10;like_reset_index=like_reset_index+1)
+                    image_likes[like_reset_index]<=0;
+                like_armed<=0;
+            end else if(key_audio_stable && audio_down_seen) begin
                 like_armed<=0;
                 if(like_armed && like_allowed && img_idx==like_image && img_idx<10 && !audio_long_marked)
                     image_likes[img_idx]<=increment_like(display_likes_bcd);

@@ -103,7 +103,9 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
             press(3,65);
             if(likes_bcd!=12'h001 || pcm_mode) $fatal(1,"Short KEY3 must like without switching audio");
             press(3,280);
-            if(likes_bcd!=12'h001) $fatal(1,"Long hold must not like");
+            if(likes_bcd!=0) $fatal(1,"Long hold must clear, release must not like");
+            press(3,65);
+            if(likes_bcd!=12'h001) $fatal(1,"Short like after clearing failed");
             press(2,65);frame;fill_window;
             if(image_id!=1 || likes_bcd!=0) $fatal(1,"Image counts are not independent");
             switch_pcm_n=0;repeat(65) @(negedge clk);press(3,65);
@@ -124,13 +126,18 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
                 $fatal(1,"Overlapping image change misattributed a like");
             press(2,65);frame;fill_window;
             switch_brightness_n=0;repeat(65) @(negedge clk);press(3,65);
+            press(3,280);
             if(likes_bcd!=0) $fatal(1,"Brightness key also liked");
             switch_brightness_n=1;switch_volume_n=0;repeat(65) @(negedge clk);press(3,65);
+            press(3,280);
             if(likes_bcd!=0) $fatal(1,"Volume mode also liked");
             switch_volume_n=1;switch_zoom_n=0;repeat(65) @(negedge clk);press(3,65);frame;
             if(!descriptor[23] || likes_bcd!=0) $fatal(1,"Preview entry also liked");
             press(3,65);frame;
             if(descriptor[23] || likes_bcd!=0) $fatal(1,"Preview confirmation also liked");
+            press(3,65);frame;press(3,280);frame;
+            if(descriptor[23] || dut.image_likes[0]!=12'h001 || dut.image_likes[1]!=12'h999)
+                $fatal(1,"Adjustment/preview long press cleared likes or failed to cancel preview");
             switch_zoom_n=1;repeat(65) @(negedge clk);frame;fill_window;
             // Enabling/disabling an adjustment while held cancels the gesture.
             key_audio=0;repeat(65) @(negedge clk);
@@ -138,8 +145,24 @@ module tb_thumbnail_control #(parameter SWITCH_TEST=0, parameter VOLUME_TEST=0, 
             switch_volume_n=1;repeat(65) @(negedge clk);
             key_audio=1;repeat(65) @(negedge clk);
             if(likes_bcd!=0) $fatal(1,"Mode change retained armed like");
+            if(dut.image_likes[0]!=12'h001 || dut.image_likes[1]!=12'h999)
+                $fatal(1,"Cancelled gesture cleared other pictures");
             press(4,65);press(3,65);
             if(!dut.auto_play_en || likes_bcd!=12'h001) $fatal(1,"Autoplay like failed");
+            // Seed all slots, including pictures outside the current cache.
+            for(n=0;n<10;n=n+1) dut.image_likes[n]=12'h123;
+            key_audio=0;repeat(280) @(negedge clk);
+            for(n=0;n<10;n=n+1)
+                if(dut.image_likes[n]!=0) $fatal(1,"Held KEY3 did not clear every image");
+            if(!pcm_mode || !dut.auto_play_en) $fatal(1,"Clearing changed playback mode");
+            // A continued hold must not retrigger the clear pulse.
+            dut.image_likes[9]=12'h005;
+            repeat(280) @(negedge clk);
+            if(dut.image_likes[9]!=12'h005) $fatal(1,"Long hold cleared repeatedly");
+            key_audio=1;repeat(65) @(negedge clk);
+            if(likes_bcd!=0) $fatal(1,"Long-press release added a like");
+            press(3,65);
+            if(likes_bcd!=12'h001) $fatal(1,"Short press did not resume after clear");
             boot;
             for(n=0;n<10;n=n+1)
                 if(dut.image_likes[n]!=0) $fatal(1,"Reset did not clear every count");
